@@ -2,6 +2,7 @@ use crate::avm1::{PropertyMap as Avm1PropertyMap, PropertyMap};
 use crate::avm2::{Class as Avm2Class, Domain as Avm2Domain};
 use crate::backend::audio::SoundHandle;
 use crate::character::Character;
+use crate::memory_report::LibraryMemoryUsage;
 
 use crate::display_object::{Bitmap, Graphic, MorphShape, Text};
 use crate::font::{Font, FontDescriptor, FontLike, FontQuery, FontType};
@@ -113,6 +114,40 @@ impl<'gc> MovieLibrary<'gc> {
             fonts: Default::default(),
             avm2_domain: None,
         }
+    }
+
+    /// Totals up everything this library is currently keeping resident.
+    ///
+    /// Used by [`crate::memory_report`] to attribute retained memory to the
+    /// movie that owns it.
+    pub fn memory_usage(&self) -> LibraryMemoryUsage {
+        let mut usage = LibraryMemoryUsage {
+            characters: self.characters.len(),
+            has_domain: self.avm2_domain.is_some(),
+            ..Default::default()
+        };
+
+        for character in self.characters.values() {
+            match character {
+                Character::Bitmap(bitmap) => {
+                    let compressed = bitmap.compressed();
+                    let size = compressed.size();
+                    usage.bitmaps += 1;
+                    if bitmap.is_uploaded() {
+                        usage.uploaded_bitmaps += 1;
+                    }
+                    usage.bitmap_source_bytes += compressed.source_bytes();
+                    // Four bytes per pixel once decoded to RGBA, which is what
+                    // both the decoded copy and the GPU texture cost.
+                    usage.bitmap_decoded_bytes += size.width as usize * size.height as usize * 4;
+                }
+                Character::Sound(_) => usage.sounds += 1,
+                Character::Font(_) => usage.fonts += 1,
+                _ => {}
+            }
+        }
+
+        usage
     }
 
     /// Registers a character; returns `true` if successful, or `false` if a character with
