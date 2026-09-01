@@ -22,7 +22,7 @@ pub fn byte_array_allocator<'gc>(
         .context
         .library
         .avm2_class_registry()
-        .class_symbol(class.inner_class_definition())
+        .class_symbol(activation.gc(), class.inner_class_definition())
     {
         if let Some(lib) = activation.context.library.library_for_movie(movie) {
             if let Some(Character::BinaryData(binary_data)) = lib.character_by_id(id) {

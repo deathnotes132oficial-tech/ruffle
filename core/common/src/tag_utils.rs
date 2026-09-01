@@ -64,6 +64,11 @@ impl<'gc> SwfMovieWeak<'gc> {
     pub fn upgrade(&self, mc: &Mutation<'gc>) -> Option<SwfMovie<'gc>> {
         self.0.upgrade(mc).map(SwfMovie)
     }
+
+    /// Whether the movie this points at has already been collected.
+    pub fn is_dropped(self) -> bool {
+        self.0.is_dropped()
+    }
 }
 
 /// An open, fully parsed SWF movie ready to play back, either in a Player or a

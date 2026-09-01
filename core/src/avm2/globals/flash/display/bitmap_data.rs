@@ -103,7 +103,7 @@ pub fn init<'gc>(
         .context
         .library
         .avm2_class_registry()
-        .class_symbol(this.instance_class())
+        .class_symbol(activation.gc(), this.instance_class())
         .and_then(|(movie, chara_id)| {
             activation
                 .context

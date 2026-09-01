@@ -32,7 +32,7 @@ pub fn init<'gc>(
             .context
             .library
             .avm2_class_registry()
-            .class_symbol(class_def)
+            .class_symbol(activation.gc(), class_def)
         {
             if let Some(Character::Sound(sound)) = activation
                 .context

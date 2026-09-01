@@ -398,6 +398,17 @@ impl<'gc> MovieClip<'gc> {
         write.flags.set(MovieClipFlags::PLAYING);
         write.current_frame.set(0);
         write.audio_stream.take();
+
+        // Remember that this clip is what the movie was loaded into, so that
+        // the movie's library can be released once the clip is gone. Without
+        // this the library would outlive the content forever, because its own
+        // characters keep the movie alive.
+        if let Some(root) = self.as_displayobject().try_downgrade() {
+            context
+                .library
+                .library_for_movie_mut(movie)
+                .set_content_root(root);
+        }
     }
 
     pub fn set_initialized(self) {
@@ -4361,11 +4372,12 @@ impl<'gc, 'a> MovieClip<'gc> {
                 let name = AvmString::new(activation.gc(), class_name);
                 match Avm2::lookup_class_for_character(&mut activation, self, domain, name, id) {
                     Ok(class_object) => {
+                        let mc = activation.gc();
                         activation
                             .context
                             .library
                             .avm2_class_registry_mut()
-                            .set_class_symbol(class_object.inner_class_definition(), movie, id);
+                            .set_class_symbol(mc, class_object.inner_class_definition(), movie, id);
 
                         let library = activation.context.library.library_for_movie_mut(movie);
 

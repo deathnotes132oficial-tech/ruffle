@@ -25,7 +25,7 @@ pub fn video_allocator<'gc>(
             .context
             .library
             .avm2_class_registry()
-            .class_symbol(target)
+            .class_symbol(activation.gc(), target)
         {
             let child = activation
                 .context

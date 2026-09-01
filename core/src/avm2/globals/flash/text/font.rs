@@ -155,7 +155,7 @@ pub fn register_font<'gc>(
             .context
             .library
             .avm2_class_registry()
-            .class_symbol(class.inner_class_definition())
+            .class_symbol(activation.gc(), class.inner_class_definition())
         && let Some(lib) = activation.context.library.library_for_movie(movie)
         && let Some(Character::Font(font)) = lib.character_by_id(id)
     {

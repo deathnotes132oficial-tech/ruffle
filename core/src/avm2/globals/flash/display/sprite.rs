@@ -34,7 +34,7 @@ pub fn sprite_allocator<'gc>(
             .context
             .library
             .avm2_class_registry()
-            .class_symbol(class)
+            .class_symbol(activation.gc(), class)
         {
             let child = activation
                 .context

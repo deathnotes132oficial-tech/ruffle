@@ -44,7 +44,7 @@ pub fn bitmap_allocator<'gc>(
             .context
             .library
             .avm2_class_registry()
-            .class_symbol(class)
+            .class_symbol(activation.gc(), class)
             && let Some(Character::Bitmap(bitmap)) = activation
                 .context
                 .library
