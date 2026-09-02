@@ -1,6 +1,6 @@
 use crate::sandbox::SandboxType;
 
-use gc_arena::{Collect, Gc, GcWeak, Mutation};
+use gc_arena::{Collect, Finalization, Gc, GcWeak, Mutation};
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
@@ -68,6 +68,12 @@ impl<'gc> SwfMovieWeak<'gc> {
     /// Whether the movie this points at has already been collected.
     pub fn is_dropped(self) -> bool {
         self.0.is_dropped()
+    }
+
+    /// Whether the movie this points at was not reached from the root by the
+    /// marking phase that this finalization concludes.
+    pub fn is_dead(self, fc: &Finalization<'gc>) -> bool {
+        self.0.is_dead(fc)
     }
 }
 
