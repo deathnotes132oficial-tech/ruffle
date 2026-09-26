@@ -883,9 +883,9 @@ impl<'gc> Library<'gc> {
 
         let metrics = mc.metrics();
         if total > self.reported_external_bytes {
-            metrics.mark_external_allocation(total - self.reported_external_bytes);
+            crate::skua_external_allocation(metrics, total - self.reported_external_bytes);
         } else {
-            metrics.mark_external_deallocation(self.reported_external_bytes - total);
+            crate::skua_external_deallocation(metrics, self.reported_external_bytes - total);
         }
         self.reported_external_bytes = total;
     }

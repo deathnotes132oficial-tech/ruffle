@@ -1058,8 +1058,8 @@ impl ThresholdOperation {
 ///
 /// The collector only counts the `Gc` box a `BitmapData` lives in; the pixel
 /// buffer behind it is often thousands of times larger. Content that draws
-/// bitmaps by the dozen - a game rendering every avatar in a room to a bitmap
-/// - would otherwise pile up megabytes of unreachable pixels between the
+/// bitmaps by the dozen - a game rendering every avatar in a room to a
+/// bitmap - would otherwise pile up megabytes of unreachable pixels between the
 /// collector's cycles, and the GPU textures that go with them.
 pub struct TrackedPixels {
     pixels: Vec<Color>,
@@ -1082,7 +1082,7 @@ impl TrackedPixels {
 
     pub fn new(pixels: Vec<Color>, metrics: Option<Metrics>) -> Self {
         if let Some(metrics) = &metrics {
-            metrics.mark_external_allocation(Self::bytes(&pixels));
+            crate::skua_external_allocation(metrics, Self::bytes(&pixels));
         }
         Self { pixels, metrics }
     }
@@ -1098,7 +1098,7 @@ impl TrackedPixels {
     pub fn clear_and_free(&mut self) {
         let old = std::mem::take(&mut self.pixels);
         if let Some(metrics) = &self.metrics {
-            metrics.mark_external_deallocation(Self::bytes(&old));
+            crate::skua_external_deallocation(metrics, Self::bytes(&old));
         }
     }
 }
@@ -1112,7 +1112,7 @@ impl Clone for TrackedPixels {
 impl Drop for TrackedPixels {
     fn drop(&mut self) {
         if let Some(metrics) = &self.metrics {
-            metrics.mark_external_deallocation(Self::bytes(&self.pixels));
+            crate::skua_external_deallocation(metrics, Self::bytes(&self.pixels));
         }
     }
 }

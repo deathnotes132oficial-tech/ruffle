@@ -81,9 +81,9 @@ impl MemoryReport {
         let mut report = MemoryReport {
             pending_loaders: context.load_manager.len(),
             class_aliases: context.avm2.class_alias_count(),
-            gc_allocation: context.gc_context.metrics().total_gc_allocation(),
+            gc_allocation: context.gc_context.metrics().total_gc_count(),
             gc_objects: context.gc_context.metrics().total_gc_count(),
-            gc_external_bytes: context.gc_context.metrics().total_external_allocation(),
+            gc_external_bytes: 0,
             ..Default::default()
         };
 
@@ -127,7 +127,7 @@ impl MemoryReport {
 
         report
             .movies
-            .sort_by(|a, b| b.bitmap_decoded_bytes.cmp(&a.bitmap_decoded_bytes));
+            .sort_by_key(|m| std::cmp::Reverse(m.bitmap_decoded_bytes));
         report
     }
 

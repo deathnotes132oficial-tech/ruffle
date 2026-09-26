@@ -224,7 +224,7 @@ impl std::fmt::Debug for TrackedCacheBitmap {
 impl TrackedCacheBitmap {
     fn new(info: BitmapInfo, metrics: Metrics) -> Self {
         let bytes = info.width as usize * info.height as usize * 4;
-        metrics.mark_external_allocation(bytes);
+        crate::skua_external_allocation(&metrics, bytes);
         Self {
             info,
             bytes,
@@ -235,7 +235,7 @@ impl TrackedCacheBitmap {
 
 impl Drop for TrackedCacheBitmap {
     fn drop(&mut self) {
-        self.metrics.mark_external_deallocation(self.bytes);
+        crate::skua_external_deallocation(&self.metrics, self.bytes);
     }
 }
 

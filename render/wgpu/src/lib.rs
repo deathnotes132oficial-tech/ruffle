@@ -277,8 +277,8 @@ pub struct Texture {
     copy_count: Cell<u8>,
 }
 
-/// Bytes of texture memory Ruffle itself has asked for and not yet released
-/// - bitmap textures, cached display objects, pooled render targets - and
+/// Bytes of texture memory Ruffle itself has asked for and not yet released -
+/// bitmap textures, cached display objects, pooled render targets - and
 /// how many such textures there are. Not every backend can report texture
 /// memory, so this is counted here for the memory report.
 static TEXTURE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

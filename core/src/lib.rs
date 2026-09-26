@@ -78,3 +78,12 @@ pub const DEFAULT_PLAYER_VERSION: u8 = 32;
 
 /// Path to the raw playerglobal ABC, for use as an `asc.jar` import library.
 pub const PLAYERGLOBAL_ABC_PATH: &str = env!("RUFFLE_PLAYERGLOBAL_ABC_PATH");
+
+/// skua #13: gc-arena 0.7 has no external-allocation accounting (0.5 did, and the ported
+/// library-lifetime fix relied on it). Debt is counted in `Gc` objects there, so charge
+/// external bytes as object-equivalents; frees can't be credited.
+pub(crate) fn skua_external_allocation(metrics: &gc_arena::metrics::Metrics, bytes: usize) {
+    metrics.adjust_debt(bytes as f64 / 128.0);
+}
+
+pub(crate) fn skua_external_deallocation(_metrics: &gc_arena::metrics::Metrics, _bytes: usize) {}
