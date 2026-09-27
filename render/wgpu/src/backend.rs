@@ -1329,7 +1329,40 @@ fn submit_encoder(
     );
     let index = descriptors.queue.submit(Some(draw_encoder.finish()));
     staging_belt.recall();
+    skua_bound_in_flight(descriptors, index.clone());
     index
+}
+
+/// skua #13: backpressure. Nothing stops the CPU from recording offscreen draws faster than the
+/// GPU runs them, and every queued submission holds Metal driver memory until it completes
+/// (`Stress2`: ~1 GB/s). Keep at most `max_in_flight()` submissions outstanding by waiting for
+/// the oldest. skua #17: 2 by default (0 = off); `set_max_in_flight` overrides it.
+static MAX_IN_FLIGHT: AtomicU32 = AtomicU32::new(2);
+
+pub fn set_max_in_flight(submissions: u32) {
+    MAX_IN_FLIGHT.store(submissions, Ordering::Relaxed);
+}
+
+pub fn max_in_flight() -> u32 {
+    MAX_IN_FLIGHT.load(Ordering::Relaxed)
+}
+
+fn skua_bound_in_flight(descriptors: &Descriptors, index: SubmissionIndex) {
+    static IN_FLIGHT: std::sync::Mutex<std::collections::VecDeque<SubmissionIndex>> =
+        std::sync::Mutex::new(std::collections::VecDeque::new());
+    let max = max_in_flight() as usize;
+    if max == 0 {
+        return;
+    }
+    let mut q = IN_FLIGHT.lock().unwrap();
+    q.push_back(index);
+    while q.len() > max {
+        let oldest = q.pop_front().unwrap();
+        let _ = descriptors.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(oldest),
+            timeout: None,
+        });
+    }
 }
 
 pub struct ActiveFrame {
@@ -1373,6 +1406,7 @@ impl ActiveFrame {
             frame,
         );
         self.staging_belt.recall();
+        skua_bound_in_flight(descriptors, index.clone());
         index
     }
 
