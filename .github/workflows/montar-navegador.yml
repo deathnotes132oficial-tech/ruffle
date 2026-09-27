@@ -44,10 +44,21 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      # AS FONTES DA BIBLIOTECA PADRAO (rust-src) SAO OBRIGATORIAS AQUI.
+      #
+      # O segundo .wasm, o de navegador antigo, e compilado com build-std —
+      # ou seja, a propria biblioteca padrao do Rust e recompilada junto, e
+      # pra isso o codigo-fonte dela precisa estar na maquina. Sem ele a
+      # compilacao morre com "library/Cargo.lock does not exist", que nao diz
+      # nada sobre o que falta de verdade.
+      #
+      # A receita de TESTE deles nao pede isto porque compila so um .wasm. A
+      # de PUBLICACAO pede — e e a de publicacao que a gente esta seguindo.
       - name: Preparar o Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: rust-src
 
       # Guarda o que ja foi compilado entre uma rodada e outra.
       #
