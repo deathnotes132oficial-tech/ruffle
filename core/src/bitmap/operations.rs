@@ -1388,27 +1388,6 @@ pub fn draw<'gc>(
     // com "alpha" (phy/maps/Tile.as). O buraco sai preenchido em vez de
     // vazado, entao alguma dessas duas chamadas nao esta fazendo o que
     // deveria. Isto diz QUAL chamada chega aqui e por onde ela sai.
-    // MANTIDA, MAS SO PRA CONFIRMAR AUSENCIA.
-    //
-    // Num tiro completo esta linha nao apareceu nenhuma vez, o que provou que
-    // o buraco visivel NAO passa por aqui — passa pelo Stage3D. Continua no
-    // lugar porque, se um dia ela comecar a aparecer, o caminho mudou.
-    if blend_mode == BlendMode::Erase || blend_mode == BlendMode::Alpha {
-        tracing::warn!(
-            "CRATERA-FLASH: draw modo={:?} origem={} alvo={}x{} escala=({},{}) suavizar={}",
-            blend_mode,
-            match &source {
-                IBitmapDrawable::BitmapData(_) => "BitmapData",
-                IBitmapDrawable::DisplayObject(_) => "DisplayObject",
-            },
-            target.width(),
-            target.height(),
-            transform.matrix.a,
-            transform.matrix.d,
-            smoothing,
-        );
-    }
-
     // Calculate the maximum potential area that this draw call will affect
     let bounds = transform.matrix * source.bounds();
     let mut dirty_region = PixelRegion::from(bounds);
@@ -1426,7 +1405,6 @@ pub fn draw<'gc>(
         // of the source BitmapData. Note - this is different from drawing a 'Bitmap'
         // with the same underlying 'BitmapData'
         if blend_mode == BlendMode::Alpha || blend_mode == BlendMode::Erase {
-            tracing::warn!("CRATERA: descartado — origem BitmapData com {:?}", blend_mode);
             return Ok(());
         }
 
@@ -1581,15 +1559,6 @@ pub fn draw<'gc>(
         cache_draws.is_empty(),
         "BitmapData.draw() should not use cacheAsBitmap"
     );
-    if blend_mode == BlendMode::Erase || blend_mode == BlendMode::Alpha {
-        tracing::warn!(
-            "CRATERA: indo pro desenhista com {:?}, area {}x{}",
-            blend_mode,
-            dirty_region.width(),
-            dirty_region.height(),
-        );
-    }
-
     let image = context
         .renderer
         .render_offscreen(handle, commands, quality, dirty_region);
