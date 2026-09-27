@@ -10,7 +10,7 @@ use crate::{
 use gc_arena::Collect;
 pub use ruffle_common::buffer::Substream;
 use ruffle_common::duration::FloatDuration;
-use slotmap::{Key, SlotMap, new_key_type};
+use slotmap::{SlotMap, new_key_type};
 
 #[cfg(feature = "audio")]
 pub mod decoders;
@@ -219,15 +219,41 @@ struct NullSound {
 /// Audio backend that ignores all audio.
 pub struct NullAudioBackend {
     sounds: SlotMap<SoundHandle, NullSound>,
+    /// skua #13: playing instances, so event sounds can end after their duration.
+    /// Without this nothing ever ends, `soundComplete` never fires, and content that keeps its
+    /// channels until then (AQW's `SoundFX.activeChannels`) grows without bound.
+    instances: SlotMap<SoundInstanceHandle, NullInstance>,
     volume: f32,
+}
+
+struct NullInstance {
+    start: web_time::Instant,
+    /// `None` for streams and sounds of unknown length: they play until stopped.
+    length: Option<Duration>,
+}
+
+impl NullInstance {
+    fn has_ended(&self) -> bool {
+        self.length.is_some_and(|len| self.start.elapsed() >= len)
+    }
 }
 
 impl NullAudioBackend {
     pub fn new() -> NullAudioBackend {
         NullAudioBackend {
             sounds: SlotMap::with_key(),
+            instances: SlotMap::with_key(),
             volume: 1.0,
         }
+    }
+
+    fn start_instance(&mut self, length: Option<Duration>) -> SoundInstanceHandle {
+        // Nothing stops an event sound that ended on its own, so forget those here.
+        self.instances.retain(|_, i| !i.has_ended());
+        self.instances.insert(NullInstance {
+            start: web_time::Instant::now(),
+            length,
+        })
     }
 }
 
@@ -269,10 +295,20 @@ impl AudioBackend for NullAudioBackend {
 
     fn start_sound(
         &mut self,
-        _sound: SoundHandle,
-        _sound_info: &swf::SoundInfo,
+        sound: SoundHandle,
+        sound_info: &swf::SoundInfo,
     ) -> Result<SoundInstanceHandle, DecodeError> {
-        Ok(SoundInstanceHandle::null())
+        let length = self
+            .sounds
+            .get(sound)
+            .map(|s| s.duration)
+            .filter(|d| *d > FloatDuration::ZERO)
+            .map(|d| {
+                Duration::from_secs_f64(
+                    d.as_millis() / 1000.0 * f64::from(sound_info.num_loops.max(1)),
+                )
+            });
+        Ok(self.start_instance(length))
     }
 
     fn start_stream(
@@ -280,7 +316,7 @@ impl AudioBackend for NullAudioBackend {
         _clip_data: crate::tag_utils::SwfSlice,
         _handle: &swf::SoundStreamHead,
     ) -> Result<SoundInstanceHandle, DecodeError> {
-        Ok(SoundInstanceHandle::null())
+        Ok(self.start_instance(None))
     }
 
     fn start_substream(
@@ -288,14 +324,21 @@ impl AudioBackend for NullAudioBackend {
         _stream_data: Substream,
         _handle: &SoundStreamInfo,
     ) -> Result<SoundInstanceHandle, DecodeError> {
-        Ok(SoundInstanceHandle::null())
+        Ok(self.start_instance(None))
     }
 
-    fn stop_sound(&mut self, _sound: SoundInstanceHandle) {}
+    fn stop_sound(&mut self, sound: SoundInstanceHandle) {
+        self.instances.remove(sound);
+    }
 
-    fn stop_all_sounds(&mut self) {}
-    fn get_sound_position(&self, _instance: SoundInstanceHandle) -> Option<f64> {
-        Some(0.0)
+    fn stop_all_sounds(&mut self) {
+        self.instances.clear();
+    }
+    fn get_sound_position(&self, instance: SoundInstanceHandle) -> Option<f64> {
+        // Position stays 0 as before (timeline sync and `SoundChannel.position` unchanged);
+        // event sounds now end once their duration has passed.
+        let i = self.instances.get(instance)?;
+        (!i.has_ended()).then_some(0.0)
     }
     fn get_sound_duration(&self, sound: SoundHandle) -> Option<FloatDuration> {
         if let Some(sound) = self.sounds.get(sound) {
@@ -908,5 +951,82 @@ impl Default for SoundTransform {
             right_to_left: 0.0,
             right_to_right: 1.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1 kHz sound of `ms` samples, so it lasts `ms` milliseconds.
+    fn register(audio: &mut NullAudioBackend, ms: u32) -> SoundHandle {
+        audio
+            .register_sound(&swf::Sound {
+                id: 1,
+                format: swf::SoundFormat {
+                    compression: swf::AudioCompression::Uncompressed,
+                    sample_rate: 1000,
+                    is_stereo: false,
+                    is_16_bit: false,
+                },
+                num_samples: ms,
+                data: &[0; 4],
+            })
+            .unwrap()
+    }
+
+    fn play(audio: &mut NullAudioBackend, sound: SoundHandle) -> SoundInstanceHandle {
+        let info = swf::SoundInfo {
+            event: swf::SoundEvent::Event,
+            in_sample: None,
+            out_sample: None,
+            num_loops: 1,
+            envelope: None,
+        };
+        audio.start_sound(sound, &info).unwrap()
+    }
+
+    #[test]
+    fn null_event_sound_ends_after_its_duration() {
+        let mut audio = NullAudioBackend::new();
+        let sound = register(&mut audio, 20);
+        let instance = play(&mut audio, sound);
+        assert_eq!(audio.get_sound_position(instance), Some(0.0));
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(audio.get_sound_position(instance), None);
+    }
+
+    #[test]
+    fn null_sound_ends_when_stopped() {
+        let mut audio = NullAudioBackend::new();
+        let sound = register(&mut audio, 60_000);
+        let stopped = play(&mut audio, sound);
+        let playing = play(&mut audio, sound);
+        audio.stop_sound(stopped);
+        assert_eq!(audio.get_sound_position(stopped), None);
+        assert_eq!(audio.get_sound_position(playing), Some(0.0));
+        audio.stop_all_sounds();
+        assert_eq!(audio.get_sound_position(playing), None);
+    }
+
+    #[test]
+    fn null_ended_sounds_are_forgotten() {
+        let mut audio = NullAudioBackend::new();
+        let sound = register(&mut audio, 10);
+        for _ in 0..3 {
+            play(&mut audio, sound);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        play(&mut audio, sound);
+        assert_eq!(audio.instances.len(), 1);
+    }
+
+    #[test]
+    fn null_sound_of_unknown_length_plays_until_stopped() {
+        let mut audio = NullAudioBackend::new();
+        let sound = audio.register_mp3(&[]).unwrap();
+        let instance = play(&mut audio, sound);
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(audio.get_sound_position(instance), Some(0.0));
     }
 }
