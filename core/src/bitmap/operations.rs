@@ -1382,12 +1382,6 @@ pub fn draw<'gc>(
     clip_rect: Option<Rectangle<Twips>>,
     quality: StageQuality,
 ) -> Result<(), BitmapDataDrawError> {
-    // ANOTACAO TEMPORARIA — investigacao da cratera do DDTank.
-    //
-    // O jogo cava o mapa com bitmapData.draw(..., "erase") e recorta a borda
-    // com "alpha" (phy/maps/Tile.as). O buraco sai preenchido em vez de
-    // vazado, entao alguma dessas duas chamadas nao esta fazendo o que
-    // deveria. Isto diz QUAL chamada chega aqui e por onde ela sai.
     // Calculate the maximum potential area that this draw call will affect
     let bounds = transform.matrix * source.bounds();
     let mut dirty_region = PixelRegion::from(bounds);
