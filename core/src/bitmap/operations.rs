@@ -1590,26 +1590,6 @@ pub fn draw<'gc>(
         );
     }
 
-    // EXPERIMENTO — cratera do DDTank.
-    //
-    // O apagamento e o recorte por alfa sao calculados num sombreador que usa
-    // "discard" pra deixar o pixel de fora intacto. Em qualidade alta o Ruffle
-    // desenha com varias amostras por pixel, e discard com varias amostras nao
-    // decide o pixel inteiro: decide amostra por amostra, e a transparencia
-    // final vira a media delas. O resultado pode sair opaco onde deveria sair
-    // vazado — que e exatamente o que se ve no jogo, tanto na imagem quanto na
-    // colisao, ja que as duas leem o mesmo bitmap.
-    //
-    // Aqui, so para estas duas misturas, a qualidade cai para uma amostra por
-    // pixel. Nao afeta o desenho do jogo: vale apenas para este desenho fora
-    // da tela, e o que ele produz e um recorte, nao uma imagem suavizada.
-    let quality = if blend_mode == BlendMode::Erase || blend_mode == BlendMode::Alpha {
-        tracing::warn!("CRATERA: forcando uma amostra por pixel (era {:?})", quality);
-        StageQuality::Low
-    } else {
-        quality
-    };
-
     let image = context
         .renderer
         .render_offscreen(handle, commands, quality, dirty_region);
