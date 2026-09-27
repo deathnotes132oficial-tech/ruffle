@@ -23,6 +23,22 @@ fn main_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // src is the pixel that we want to apply
     var src: vec4<f32> = textureSample(current_texture, texture_sampler, in.uv);
 
+    // SONDA — esta versao ESTRAGA a imagem DE PROPOSITO.
+    //
+    // Varias hipoteses sobre a cratera cairam porque o codigo parece correto
+    // em todos os pontos que da pra ler. Esta sonda pergunta outra coisa: o
+    // que este calculo devolve chega a valer alguma coisa?
+    //
+    // Ela devolve transparencia total, sempre. Se o resultado deste calculo
+    // for mesmo usado, a borda queimada tem que SUMIR por completo do jogo.
+    // Se ela continuar aparecendo igual, o que este calculo devolve esta
+    // sendo ignorado ou sobrescrito depois — e a causa esta fora daqui.
+    //
+    // NAO E UM CONSERTO. E pra ser desfeita assim que responder.
+    if (true) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
     if (src.a > 0.0) {
         return vec4<f32>(dst.rgb * src.a, src.a * dst.a);
     } else {
