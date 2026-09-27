@@ -26,13 +26,11 @@ fn main_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if (src.a > 0.0) {
         return vec4<f32>(dst.rgb * (1.0 - src.a), (1.0 - src.a) * dst.a);
     } else {
-        // EXPERIMENTO — cratera do DDTank.
-        //
-        // Aqui havia um "discard". Ele e equivalente a devolver o proprio
-        // pixel do mapa, com uma diferenca: descarte com varias amostras por
-        // pixel decide amostra por amostra, e a transparencia final vira a
-        // media delas. Devolvendo o valor direto, o resultado nao depende
-        // disso.
+        if (true) {
+            // This needs to be in a branch because... reasons. Bug in naga.
+            // https://github.com/gfx-rs/naga/issues/2168
+            discard;
+        }
         return dst;
     }
 }
