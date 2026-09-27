@@ -1388,9 +1388,14 @@ pub fn draw<'gc>(
     // com "alpha" (phy/maps/Tile.as). O buraco sai preenchido em vez de
     // vazado, entao alguma dessas duas chamadas nao esta fazendo o que
     // deveria. Isto diz QUAL chamada chega aqui e por onde ela sai.
+    // MANTIDA, MAS SO PRA CONFIRMAR AUSENCIA.
+    //
+    // Num tiro completo esta linha nao apareceu nenhuma vez, o que provou que
+    // o buraco visivel NAO passa por aqui — passa pelo Stage3D. Continua no
+    // lugar porque, se um dia ela comecar a aparecer, o caminho mudou.
     if blend_mode == BlendMode::Erase || blend_mode == BlendMode::Alpha {
         tracing::warn!(
-            "CRATERA: draw modo={:?} origem={} alvo={}x{} escala=({},{}) suavizar={}",
+            "CRATERA-FLASH: draw modo={:?} origem={} alvo={}x{} escala=({},{}) suavizar={}",
             blend_mode,
             match &source {
                 IBitmapDrawable::BitmapData(_) => "BitmapData",
