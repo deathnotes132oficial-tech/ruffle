@@ -375,6 +375,13 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         }
     }
 
+    /// skua #13: what `submit_frame` does to bound per-frame state, for a host that is not rendering:
+    /// submit pending offscreen work and drop the offscreen texture pool.
+    pub fn skua_trim(&mut self) {
+        self.active_frame.submit_direct(&self.descriptors);
+        self.offscreen_texture_pool = TexturePool::new();
+    }
+
     pub fn descriptors(&self) -> &Arc<Descriptors> {
         &self.descriptors
     }
@@ -681,6 +688,9 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
         self.offscreen_texture_pool = TexturePool::new();
+        if let Some((age, keep)) = skua_pool_trim() {
+            self.texture_pool.end_frame(age, keep);
+        }
         self.profiler
             .end_frame()
             .expect("Frame should end successfully");
@@ -1331,4 +1341,16 @@ impl ActiveFrame {
             self.submit_direct(descriptors);
         }
     }
+}
+
+/// skua #13: `(max_age_frames, keep_per_size)` for the main-frame texture pool, trimmed at the end
+/// of every frame (upstream only clears it on resize). On by default; `None` is upstream behaviour.
+static POOL_TRIM: std::sync::Mutex<Option<(u64, usize)>> = std::sync::Mutex::new(Some((30, 4)));
+
+pub fn set_pool_trim(trim: Option<(u64, usize)>) {
+    *POOL_TRIM.lock().unwrap() = trim;
+}
+
+fn skua_pool_trim() -> Option<(u64, usize)> {
+    *POOL_TRIM.lock().unwrap()
 }

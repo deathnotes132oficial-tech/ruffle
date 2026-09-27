@@ -30,11 +30,29 @@ impl Drop for PooledTexture {
 pub struct TexturePool {
     pools: FnvHashMap<TextureKey, BufferPool<PooledTexture, AlwaysCompatible>>,
     globals_cache: FnvHashMap<GlobalsKey, Arc<Globals>>,
+    /// skua #13: frame of last use per key, so sizes that stop being used can be evicted.
+    last_used: FnvHashMap<TextureKey, u64>,
+    frame: u64,
 }
 
 impl TexturePool {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// skua #13: drop pooled textures whose size has not been asked for in the last `max_age` frames.
+    /// Entries still borrowed are dropped when returned (their pool is gone).
+    /// Also keeps at most `keep` idle textures per size, so one heavy frame doesn't pin its peak forever.
+    pub fn end_frame(&mut self, max_age: u64, keep: usize) {
+        self.frame += 1;
+        let frame = self.frame;
+        let last_used = &self.last_used;
+        self.pools
+            .retain(|k, _| last_used.get(k).is_some_and(|f| frame - f <= max_age));
+        self.last_used.retain(|_, f| frame - *f <= max_age);
+        for pool in self.pools.values() {
+            pool.available.lock().unwrap().truncate(keep);
+        }
     }
 
     pub fn get_texture(
@@ -51,6 +69,7 @@ impl TexturePool {
             format,
             sample_count,
         };
+        self.last_used.insert(key, self.frame);
         let pool = self.pools.entry(key).or_insert_with(|| {
             let label = if cfg!(feature = "render_debug_labels") {
                 use std::sync::atomic::{AtomicU32, Ordering};
