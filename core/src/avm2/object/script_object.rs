@@ -176,6 +176,35 @@ impl<'gc> ScriptObjectData<'gc> {
 #[derive(Clone, Copy)]
 pub struct ScriptObjectWrapper<'gc>(pub Gc<'gc, ScriptObjectData<'gc>>);
 
+impl<'gc> ScriptObjectData<'gc> {
+    /// skua #13: trace like `derive(Collect)` does, but hold the object keys of `values` weakly
+    /// (`Dictionary(weakKeys = true)`). Dead keys are removed at finalization, see
+    /// `DictionaryObject::skua_purge_dead_keys`.
+    pub fn skua_trace_weak_keys<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
+        // Exhaustive, so a field added upstream fails to compile here instead of going untraced.
+        let Self {
+            values,
+            slots,
+            bound_methods,
+            proto,
+            instance_class,
+            vtable,
+        } = self;
+        for (k, v) in values.borrow().iter() {
+            match k {
+                DynamicKey::Object(o) => cc.trace(&Gc::downgrade(o.gc_base())),
+                other => cc.trace(other),
+            }
+            cc.trace(v);
+        }
+        cc.trace(slots);
+        cc.trace(bound_methods);
+        cc.trace(proto);
+        cc.trace(instance_class);
+        cc.trace(vtable);
+    }
+}
+
 impl<'gc> ScriptObjectWrapper<'gc> {
     /// Retrieve the values stored directly on this ScriptObjectData.
     pub fn values(&self) -> Ref<'_, DynamicMap<DynamicKey<'gc>, Value<'gc>>> {

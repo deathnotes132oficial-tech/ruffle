@@ -18,7 +18,14 @@ pub fn dictionary_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
-    Ok(DictionaryObject(Gc::new(activation.gc(), DictionaryObjectData { base })).into())
+    Ok(DictionaryObject(Gc::new(
+        activation.gc(),
+        DictionaryObjectData {
+            base,
+            weak_keys: std::cell::Cell::new(false),
+        },
+    ))
+    .into())
 }
 
 /// An object that allows associations between objects and values.
@@ -42,15 +49,60 @@ impl fmt::Debug for DictionaryObject<'_> {
     }
 }
 
-#[derive(Clone, Collect, HasPrefixField)]
-#[collect(no_drop)]
+#[derive(Clone, HasPrefixField)]
 #[repr(C, align(8))]
 pub struct DictionaryObjectData<'gc> {
     /// Base script object
     base: ScriptObjectData<'gc>,
+
+    /// skua #13: `new Dictionary(true)`. Object keys are traced weakly and entries whose key
+    /// died are removed at the end of marking (`Avm2::skua_purge_weak_dictionaries`).
+    weak_keys: std::cell::Cell<bool>,
+}
+
+unsafe impl<'gc> Collect<'gc> for DictionaryObjectData<'gc> {
+    fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
+        if self.weak_keys.get() {
+            self.base.skua_trace_weak_keys(cc);
+        } else {
+            cc.trace(&self.base);
+        }
+    }
+}
+
+impl<'gc> DictionaryObjectWeak<'gc> {
+    pub fn skua_is_dead(self, fc: &gc_arena::Finalization<'gc>) -> bool {
+        self.0.is_dropped() || self.0.is_dead(fc)
+    }
 }
 
 impl<'gc> DictionaryObject<'gc> {
+    /// skua #13: switch to weak keys (`new Dictionary(true)`). Weakening edges needs no barrier.
+    pub fn skua_set_weak_keys(self) {
+        self.0.weak_keys.set(true);
+    }
+
+    /// skua #13: remove entries whose object key the finished marking phase did not reach.
+    pub fn skua_purge_dead_keys(self, fc: &gc_arena::Finalization<'gc>) -> usize {
+        let dead: Vec<DynamicKey<'gc>> = self
+            .base()
+            .values()
+            .iter()
+            .filter_map(|(k, _)| match k {
+                DynamicKey::Object(o) if Gc::downgrade(o.gc_base()).is_dead(fc) => Some(*k),
+                _ => None,
+            })
+            .collect();
+        if !dead.is_empty() {
+            let base = self.base();
+            let mut values = base.values_mut(fc);
+            for k in &dead {
+                values.remove(k);
+            }
+        }
+        dead.len()
+    }
+
     /// Retrieve a value in the dictionary's object space.
     pub fn get_property_by_object(self, name: Object<'gc>) -> Value<'gc> {
         self.base()

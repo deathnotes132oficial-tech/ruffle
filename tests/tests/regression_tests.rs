@@ -8,6 +8,7 @@ use crate::movie_library::{
     loader_unload_releases_library, released_class_frees_library, retained_class_keeps_library,
 };
 use crate::shared_object::{shared_object_avm1, shared_object_avm2, shared_object_self_ref_avm1};
+use crate::weak_dictionary::weak_keys_are_collected;
 use anyhow::Context;
 use clap::Parser;
 use libtest_mimic::{Arguments, Trial};
@@ -26,6 +27,7 @@ mod environment;
 mod external_interface;
 mod movie_library;
 mod shared_object;
+mod weak_dictionary;
 
 const TEST_TOML_NAME: &str = "test.toml";
 
@@ -119,6 +121,11 @@ fn main() {
     let env_clone = env.clone();
     runner.with_additional_test(Trial::test("released_class_frees_library", move || {
         released_class_frees_library(&*env_clone)
+    }));
+
+    let env_clone = env.clone();
+    runner.with_additional_test(Trial::test("weak_keys_are_collected", move || {
+        weak_keys_are_collected(&*env_clone)
     }));
 
     let env_clone = env.clone();

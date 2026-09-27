@@ -171,6 +171,9 @@ pub struct Avm2<'gc> {
     /// currently present on the display list. This list keeps track of that.
     broadcast_list: FnvHashMap<AvmString<'gc>, Vec<WeakObject<'gc>>>,
 
+    /// skua #13: every `Dictionary(true)` created, so dead keys can be removed at finalization.
+    pub skua_weak_dictionaries: Vec<crate::avm2::object::DictionaryObjectWeak<'gc>>,
+
     alias_to_class_map: FnvHashMap<AvmString<'gc>, ClassObject<'gc>>,
     class_to_alias_map: FnvHashMap<Class<'gc>, AvmString<'gc>>,
 
@@ -227,6 +230,7 @@ impl<'gc> Avm2<'gc> {
             native_custom_constructor_table: Default::default(),
             native_fast_call_list: Default::default(),
             broadcast_list: Default::default(),
+            skua_weak_dictionaries: Vec::new(),
 
             alias_to_class_map: Default::default(),
             class_to_alias_map: Default::default(),
@@ -373,6 +377,22 @@ impl<'gc> Avm2<'gc> {
         let mut activation = Activation::from_nothing(context);
 
         events::dispatch_event(&mut activation, target, event, simulate_dispatch)
+    }
+
+    /// skua #13: called at finalization (marking finished, nothing swept yet). Forget dead weak
+    /// dictionaries and remove the entries of live ones whose keys were not reached.
+    pub fn skua_purge_weak_dictionaries(&mut self, fc: &gc_arena::Finalization<'gc>) -> usize {
+        let mut purged = 0;
+        self.skua_weak_dictionaries.retain(|d| {
+            if d.skua_is_dead(fc) {
+                return false;
+            }
+            if let Some(dict) = d.0.upgrade(fc) {
+                purged += crate::avm2::object::DictionaryObject(dict).skua_purge_dead_keys(fc);
+            }
+            true
+        });
+        purged
     }
 
     /// Add an object to the broadcast list.
