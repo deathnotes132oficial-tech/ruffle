@@ -235,24 +235,6 @@ impl Surface {
                     blend_mode: ChunkBlendMode::Complex(blend_mode),
                     needs_stencil,
                 } => {
-                    // ANOTACAO TEMPORARIA — investigacao da cratera.
-                    //
-                    // Aqui se decide contra O QUE o apagamento acontece. Sem
-                    // camada de referencia ele e simplesmente pulado, e o
-                    // desenho nao aparece de jeito nenhum; com ela, o
-                    // resultado depende de qual textura entrou como "pai".
-                    if matches!(blend_mode, ComplexBlend::Alpha | ComplexBlend::Erase) {
-                        tracing::warn!(
-                            "CRATERA: mistura {:?}, camada={}",
-                            blend_mode,
-                            match nearest_layer {
-                                LayerRef::None => "NENHUMA (sera pulada)",
-                                LayerRef::Current => "a propria",
-                                LayerRef::Parent(_) => "a de cima",
-                            },
-                        );
-                    }
-
                     let parent = match blend_mode {
                         ComplexBlend::Alpha | ComplexBlend::Erase => {
                             match nearest_layer {
