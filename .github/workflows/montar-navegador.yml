@@ -1,0 +1,118 @@
+# Compila o Ruffle na versao de NAVEGADOR e entrega a pasta pronta.
+#
+# POR QUE ISTO EXISTE
+# -------------------
+# A pasta publico/ruffle/ do nosso servidor tem o Ruffle ja compilado, baixado
+# pronto do site deles. O defeito da cratera do DDTank mora DENTRO daqueles
+# arquivos .wasm, que sao linguagem de maquina — nao da pra abrir e corrigir.
+#
+# Esta automacao faz o que a equipe do Ruffle faz: pega o codigo-fonte,
+# compila, e devolve uma pasta com os mesmos nomes de arquivo. Trocando uma
+# pela outra, o servidor passa a rodar o Ruffle que NOS compilamos, com as
+# alteracoes que estivermos testando.
+#
+# POR QUE O NAVEGADOR E NAO O IPHONE
+# ----------------------------------
+# O mesmo defeito aparece nos dois. No navegador o ciclo e de minutos: baixar,
+# trocar a pasta, recarregar. No iPhone e uma compilacao inteira mais o
+# testador instalando. Investiga-se onde e barato.
+#
+# COMO USAR
+#   1. Actions > este fluxo > Run workflow
+#   2. no fim da pagina, baixar o artefato "ruffle-do-navegador"
+#   3. descompactar por cima de RUFFLE-WEB/publico/ruffle/
+#   4. mandar pro VPS e rodar o .bat, como sempre
+
+name: Montar o Ruffle do navegador
+
+# So roda quando voce mandar, pelo botao.
+on:
+  workflow_dispatch:
+
+jobs:
+  montar:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Pegar o codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar o Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Preparar o Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Guarda o que ja foi compilado entre uma rodada e outra.
+      #
+      # A primeira vez demora bastante — o Ruffle e grande. Da segunda em
+      # diante, so o que mudou e recompilado, e ai o ciclo fica curto, que e o
+      # motivo desta automacao existir.
+      - name: Aproveitar a compilacao anterior
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "web"
+
+      # A VERSAO TEM QUE BATER COM A DO PROJETO.
+      #
+      # O wasm-bindgen costura o Rust com o JavaScript, e a ferramenta de
+      # linha de comando precisa ser da MESMA versao da biblioteca usada na
+      # compilacao. Divergindo, a montagem falha com uma mensagem que nao
+      # explica isso. Por isso a versao e lida do Cargo.lock em vez de ficar
+      # escrita aqui: assim ela acompanha o projeto sozinha.
+      - name: Instalar o wasm-bindgen
+        run: |
+          set -e
+          VERSAO=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | head -1 | cut -d'"' -f2)
+          echo "wasm-bindgen do projeto: $VERSAO"
+          [ -n "$VERSAO" ] || { echo "Nao achei a versao no Cargo.lock."; exit 1; }
+          cargo install --locked wasm-bindgen-cli --version "$VERSAO"
+
+      # Encolhe o .wasm. Sem ele a pasta sai com o dobro do tamanho.
+      - name: Instalar o wasm-opt
+        uses: sigoden/install-binary@v1
+        with:
+          repo: WebAssembly/binaryen
+          tag: version_129
+          name: wasm-opt
+
+      # DOIS .wasm, E E DE PROPOSITO.
+      #
+      # "dual-wasm" gera uma versao moderna e uma antiga, e o navegador do
+      # visitante escolhe a que ele entende. E por isso que a pasta que esta
+      # no servidor hoje tem dois arquivos de 14 MB: ela foi montada assim.
+      # Gerando so um, navegador antigo pararia de abrir o jogo.
+      - name: Compilar
+        working-directory: web
+        run: |
+          npm ci
+          npm run build:dual-wasm
+
+      - name: Conferir o que saiu
+        run: |
+          PASTA=web/packages/selfhosted/dist
+          echo "--- conteudo:"
+          ls -lh "$PASTA"
+          echo ""
+          echo "--- os .wasm:"
+          ls -1 "$PASTA"/*.wasm | wc -l
+          if [ "$(ls -1 "$PASTA"/*.wasm 2>/dev/null | wc -l)" -lt 2 ]; then
+            echo "Saiu menos de dois .wasm. A pasta nao serve pra substituir a atual."
+            exit 1
+          fi
+          [ -f "$PASTA/ruffle.js" ] || { echo "Falta o ruffle.js."; exit 1; }
+          echo ""
+          echo "OK: a pasta tem o formato certo."
+
+      - name: Guardar a pasta pra baixar
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruffle-do-navegador
+          path: web/packages/selfhosted/dist
+          if-no-files-found: error
