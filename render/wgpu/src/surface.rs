@@ -144,6 +144,8 @@ impl Surface {
         );
 
         for chunk in chunks {
+            // skua #14: never let one encoder collect more passes than the backend can hold.
+            crate::backend::flush_if_over_pass_budget(descriptors, staging_belt, draw_encoder);
             match chunk {
                 Chunk::Draw {
                     chunk,
@@ -157,6 +159,7 @@ impl Surface {
                         draw_encoder,
                         &dynamic_transforms.vertex_buffer,
                     );
+                    crate::backend::note_render_pass(); // skua #14
                     let mut render_pass = draw_encoder.scoped_render_pass(
                         format!(
                             "Chunked draw calls {}",
@@ -289,6 +292,7 @@ impl Surface {
                                 ],
                             });
 
+                    crate::backend::note_render_pass(); // skua #14
                     let mut render_pass =
                         draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: create_debug_label!(

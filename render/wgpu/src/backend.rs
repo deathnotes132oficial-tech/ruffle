@@ -33,6 +33,7 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use swf::Color;
 use tracing::instrument;
 use wgpu::SubmissionIndex;
@@ -1273,6 +1274,64 @@ impl RenderTargetMode {
     }
 }
 
+/// Render passes recorded into the active frame's encoder since it was last submitted.
+///
+/// wgpu-core turns every render pass into its own backend command buffer (plus one for the
+/// barriers before it), and they all stay "created but not submitted" until the encoder is
+/// submitted. Metal treats more than 4096 of those as a lost device (older wgpu hung instead),
+/// and a single heavy Flash frame (many masks, filters, layers) can record thousands of passes.
+/// skua #14: global for the prototype; upstream this would live on `Descriptors`.
+static PASSES_SINCE_SUBMIT: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn note_render_pass() {
+    PASSES_SINCE_SUBMIT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Most passes to record before submitting mid-frame. Each pass costs 3 backend command
+/// buffers on Metal (pass, barriers, following copies), so 64 peaks at 193, far below 4096.
+/// skua #17: 64 rather than #14's 256 keeps crowded maps responsive; `set_max_passes_per_submit`
+/// overrides it.
+static MAX_PASSES_PER_SUBMIT: AtomicU32 = AtomicU32::new(64);
+
+fn max_passes_per_submit() -> u32 {
+    MAX_PASSES_PER_SUBMIT.load(Ordering::Relaxed)
+}
+
+pub fn set_max_passes_per_submit(passes: u32) {
+    MAX_PASSES_PER_SUBMIT.store(passes.max(1), Ordering::Relaxed);
+}
+
+/// Submits everything recorded so far if the pass budget is reached.
+/// Only call this between passes, on the active frame's encoder.
+pub(crate) fn flush_if_over_pass_budget(
+    descriptors: &Descriptors,
+    staging_belt: &mut wgpu::util::StagingBelt,
+    encoder: &mut wgpu::CommandEncoder,
+) {
+    if PASSES_SINCE_SUBMIT.load(Ordering::Relaxed) < max_passes_per_submit() {
+        return;
+    }
+    submit_encoder(descriptors, staging_belt, encoder);
+}
+
+fn submit_encoder(
+    descriptors: &Descriptors,
+    staging_belt: &mut wgpu::util::StagingBelt,
+    encoder: &mut wgpu::CommandEncoder,
+) -> SubmissionIndex {
+    PASSES_SINCE_SUBMIT.store(0, Ordering::Relaxed);
+    staging_belt.finish();
+    let draw_encoder = std::mem::replace(
+        encoder,
+        descriptors
+            .device
+            .create_command_encoder(&Default::default()),
+    );
+    let index = descriptors.queue.submit(Some(draw_encoder.finish()));
+    staging_belt.recall();
+    index
+}
+
 pub struct ActiveFrame {
     pub staging_belt: wgpu::util::StagingBelt,
     pub command_encoder: wgpu::CommandEncoder,
@@ -1299,6 +1358,7 @@ impl ActiveFrame {
         frame: T::Frame,
     ) -> SubmissionIndex {
         self.draws_since_flush = 0;
+        PASSES_SINCE_SUBMIT.store(0, Ordering::Relaxed);
         self.staging_belt.finish();
         let draw_encoder = std::mem::replace(
             &mut self.command_encoder,
@@ -1318,16 +1378,11 @@ impl ActiveFrame {
 
     pub fn submit_direct(&mut self, descriptors: &Descriptors) -> SubmissionIndex {
         self.draws_since_flush = 0;
-        self.staging_belt.finish();
-        let draw_encoder = std::mem::replace(
+        submit_encoder(
+            descriptors,
+            &mut self.staging_belt,
             &mut self.command_encoder,
-            descriptors
-                .device
-                .create_command_encoder(&Default::default()),
-        );
-        let index = descriptors.queue.submit(Some(draw_encoder.finish()));
-        self.staging_belt.recall();
-        index
+        )
     }
 
     pub fn maybe_flush(&mut self, descriptors: &Descriptors) {
@@ -1339,6 +1394,12 @@ impl ActiveFrame {
 
         if self.draws_since_flush > Self::MAX_DRAWS_PER_FLUSH {
             self.submit_direct(descriptors);
+        } else {
+            flush_if_over_pass_budget(
+                descriptors,
+                &mut self.staging_belt,
+                &mut self.command_encoder,
+            );
         }
     }
 }
