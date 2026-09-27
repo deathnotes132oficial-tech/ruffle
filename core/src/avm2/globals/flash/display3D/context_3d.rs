@@ -599,6 +599,24 @@ pub fn set_blend_factors<'gc>(
             .parse()
             .map_err(|_| make_error_2008(activation, "destinationFactor"))?;
 
+        // ANOTACAO TEMPORARIA — investigacao da cratera do DDTank.
+        //
+        // O Starling desenha o buraco com blendMode "erase", que ele traduz
+        // para estes dois fatores (starling/display/BlendMode.as:34):
+        //
+        //     erase -> zero / oneMinusSourceAlpha
+        //     alpha -> destinationAlpha / oneMinusSourceAlpha
+        //
+        // Se estes pares chegarem aqui e mesmo assim o buraco sair
+        // preenchido, o problema esta em como eles sao aplicados. Se NAO
+        // chegarem, o Starling nem esta pedindo — e ai o problema e outro,
+        // bem antes.
+        tracing::warn!(
+            "CRATERA-3D: fatores origem={:?} destino={:?}",
+            source_factor,
+            destination_factor,
+        );
+
         context.set_blend_factors(source_factor, destination_factor);
     }
     Ok(Value::Undefined)
@@ -653,6 +671,14 @@ pub fn set_render_to_texture<'gc>(
             "colorOutputIndex != 0"
         );
     }
+
+    // DESENHAR NUMA TEXTURA, e nao na tela.
+    //
+    // A cratera do Starling e aberta dentro de uma RenderTexture. Se este
+    // pedido nao chegar, ou chegar e nao valer, o desenho vai parar na tela
+    // — que e exatamente o que a foto mostra: o disco aparecendo POR CIMA de
+    // tudo em vez de abrir buraco na camada.
+    tracing::warn!("CRATERA-3D: desenhando numa textura");
 
     context.set_render_to_texture(
         texture.handle(),
