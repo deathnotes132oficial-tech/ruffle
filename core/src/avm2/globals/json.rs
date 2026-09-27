@@ -89,6 +89,18 @@ fn deserialize_json<'gc>(
     }
 }
 
+/// A `Number` as Flash writes it: whole numbers without a fraction (`1500000000`, not serde's
+/// `1500000000.0`), and `-0` as `0`. Only whole numbers below 2^63 are written as integers; above
+/// that, and for fractions, serde's shortest form still differs from Flash's in rare cases (`1e21`
+/// for `1e+21`). Non-finite numbers become `null`.
+fn number_to_json(n: f64) -> JsonValue {
+    if n.fract() == 0.0 && n.abs() < 9_223_372_036_854_775_808.0 {
+        JsonValue::from(n as i64)
+    } else {
+        JsonValue::from(n)
+    }
+}
+
 enum Replacer<'gc> {
     Function(FunctionObject<'gc>),
     PropList(ArrayObject<'gc>),
@@ -237,7 +249,7 @@ impl<'gc> AvmSerializer<'gc> {
             Value::Null => JsonValue::Null,
             Value::Undefined => JsonValue::Null,
             Value::Integer(i) => JsonValue::from(i),
-            Value::Number(n) => JsonValue::from(n),
+            Value::Number(n) => number_to_json(n),
             Value::Bool(b) => JsonValue::from(b),
             Value::String(s) => JsonValue::from(s.to_utf8_lossy().deref()),
             Value::Object(obj) => {
