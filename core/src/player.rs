@@ -1006,6 +1006,18 @@ impl Player {
     }
 
     pub fn set_quality(&mut self, quality: StageQuality) {
+        // ANOTACAO TEMPORARIA — a qualidade de imagem do DDTank.
+        //
+        // No Flash quem escolhe a qualidade e o PROPRIO JOGO, e o Ruffle
+        // obedece. Antes de forcar qualquer coisa, e preciso saber o que ele
+        // esta pedindo: forcar o que ja esta valendo nao mudaria nada e ainda
+        // nos faria procurar no lugar errado.
+        //
+        // SE ESTA LINHA NUNCA APARECER, o jogo nunca mexeu na qualidade — ou
+        // seja, ele ja roda na alta, que e o padrao, e a imagem macia vem de
+        // outro lugar (o jogo e 1000x600 esticado pra tela inteira).
+        tracing::warn!("QUALIDADE: o jogo pediu {:?}", quality);
+
         self.mutate_with_update_context(|context| {
             context.stage.set_quality(context, quality);
         })
