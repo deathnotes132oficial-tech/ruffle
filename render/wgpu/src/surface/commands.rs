@@ -18,6 +18,7 @@ use ruffle_render::pixel_bender::PixelBenderShaderHandle;
 use ruffle_render::quality::StageQuality;
 use ruffle_render::transform::Transform;
 use std::mem;
+use std::sync::atomic::{AtomicU32, Ordering};
 use swf::{BlendMode, Color, ColorTransform, Twips};
 use wgpu::Backend;
 use wgpu_profiler::Scope;
@@ -482,6 +483,37 @@ impl DrawCommand {
     }
 }
 
+/// skua #17: stencil state carried from one chunk to the next while drawing onto one target.
+pub struct ChunkState {
+    pub num_masks: u32,
+    pub mask_state: MaskState,
+}
+
+/// skua #17: what the command handler needs to draw finished chunks onto its own target early.
+///
+/// Upstream keeps every trivial blend's layer texture (a full-stage texture each) alive until the
+/// whole parent command list is chunked, so N sibling layers hold N stage-sized textures at once.
+/// Drawing the pending chunk after every `layer_flush()` layers bounds that to a few textures,
+/// which the texture pool then reuses.
+pub struct EarlyDraw<'a> {
+    pub surface: &'a Surface,
+    pub target: &'a CommandTarget,
+    pub state: &'a mut ChunkState,
+    pub nearest_layer: LayerRef<'a>,
+}
+
+/// skua #17: layers to collect before drawing them early (0 = upstream behaviour).
+/// 8 by default; `set_layer_flush` overrides it.
+static LAYER_FLUSH: AtomicU32 = AtomicU32::new(8);
+
+pub fn layer_flush() -> u32 {
+    LAYER_FLUSH.load(Ordering::Relaxed)
+}
+
+pub fn set_layer_flush(layers: u32) {
+    LAYER_FLUSH.store(layers, Ordering::Relaxed);
+}
+
 #[derive(Copy, Clone)]
 pub enum LayerRef<'a> {
     None,
@@ -504,8 +536,9 @@ pub fn chunk_blends<'encoder, 'global: 'encoder>(
     height: u32,
     nearest_layer: LayerRef,
     texture_pool: &'encoder mut TexturePool,
+    early: Option<EarlyDraw<'encoder>>,
 ) -> Vec<Chunk> {
-    WgpuCommandHandler::new(
+    let mut handler = WgpuCommandHandler::new(
         descriptors,
         staging_belt,
         dynamic_transforms,
@@ -516,8 +549,9 @@ pub fn chunk_blends<'encoder, 'global: 'encoder>(
         height,
         nearest_layer,
         texture_pool,
-    )
-    .chunk_blends(commands)
+    );
+    handler.early = early;
+    handler.chunk_blends(commands)
 }
 
 struct WgpuCommandHandler<'encoder, 'global: 'encoder> {
@@ -539,6 +573,9 @@ struct WgpuCommandHandler<'encoder, 'global: 'encoder> {
     vertices: BufferBuilder,
     needs_stencil: bool,
     num_masks: i32,
+    early: Option<EarlyDraw<'encoder>>,
+    /// skua #17: layer textures referenced by `current` and not yet drawn.
+    pending_layers: u32,
 }
 
 impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
@@ -582,6 +619,8 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
             vertices,
             needs_stencil: false,
             num_masks: 0,
+            early: None,
+            pending_layers: 0,
         }
     }
 
@@ -607,6 +646,7 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
     /// Every complex blend will be its own item, but every other draw will be chunked together
     fn chunk_blends(&mut self, commands: CommandList) -> Vec<Chunk> {
         commands.execute(self);
+        self.pending_layers = 0; // skua #17: drawn by the caller next
 
         let current = mem::take(&mut self.current);
         let mut result = mem::take(&mut self.result);
@@ -630,6 +670,42 @@ impl<'encoder, 'global: 'encoder> WgpuCommandHandler<'encoder, 'global> {
         }
 
         result
+    }
+
+    /// skua #17: draw everything chunked so far onto the target now, releasing its layer textures.
+    fn draw_early(&mut self) {
+        let Some(early) = self.early.as_mut() else {
+            return;
+        };
+        let mut result = mem::take(&mut self.result);
+        if !self.current.is_empty() {
+            result.push(Chunk::Draw {
+                chunk: mem::take(&mut self.current),
+                needs_stencil: self.needs_stencil,
+                transforms: mem::replace(
+                    &mut self.transforms,
+                    Self::new_transforms(self.descriptors, self.dynamic_transforms),
+                ),
+                vertices: mem::replace(
+                    &mut self.vertices,
+                    Self::new_vertices(self.descriptors, self.dynamic_transforms),
+                ),
+            });
+        }
+        for chunk in result {
+            early.surface.draw_chunk(
+                chunk,
+                early.target,
+                early.state,
+                early.nearest_layer,
+                self.descriptors,
+                self.staging_belt,
+                self.dynamic_transforms,
+                self.draw_encoder,
+                self.texture_pool,
+            );
+        }
+        self.pending_layers = 0;
     }
 
     fn add_to_current(
@@ -785,6 +861,12 @@ impl CommandHandler for WgpuCommandHandler<'_, '_> {
                         blend_mode,
                     },
                 );
+                // skua #17
+                self.pending_layers += 1;
+                let limit = layer_flush();
+                if limit > 0 && self.pending_layers >= limit {
+                    self.draw_early();
+                }
             }
             blend_type => {
                 if !self.current.is_empty() {
@@ -812,6 +894,12 @@ impl CommandHandler for WgpuCommandHandler<'_, '_> {
                     needs_stencil: self.num_masks > 0,
                 });
                 self.needs_stencil = self.num_masks > 0;
+                // skua #17
+                self.pending_layers += 1;
+                let limit = layer_flush();
+                if limit > 0 && self.pending_layers >= limit {
+                    self.draw_early();
+                }
             }
         }
     }

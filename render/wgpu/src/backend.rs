@@ -1283,6 +1283,9 @@ impl RenderTargetMode {
 /// skua #14: global for the prototype; upstream this would live on `Descriptors`.
 static PASSES_SINCE_SUBMIT: AtomicU32 = AtomicU32::new(0);
 
+/// skua #17: layers a surface collects before drawing them early (0 = upstream behaviour).
+pub use crate::surface::{layer_flush, set_layer_flush};
+
 pub(crate) fn note_render_pass() {
     PASSES_SINCE_SUBMIT.fetch_add(1, Ordering::Relaxed);
 }
