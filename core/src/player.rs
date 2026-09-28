@@ -575,7 +575,7 @@ impl Player {
                     (a, b, c, d, e, f, g, h)
                 });
             tracing::warn!(
-                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos}                  | carregamentos {carregando} sem-clipe {sem_clipe} pendentes {pendentes}"
+                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregando} sem-clipe {sem_clipe} pendentes {pendentes}"
             );
         }
 
