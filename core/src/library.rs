@@ -462,12 +462,26 @@ pub struct Library<'gc> {
     /// A list of the symbols associated with specific AVM2 constructor
     /// prototypes.
     avm2_class_registry: Avm2ClassRegistry<'gc>,
+
+    /// BIBLIOTECAS ESPERANDO PRA SEREM SOLTAS.
+    ///
+    /// Quando o jogo descarrega um SWF, a biblioteca dele nao pode ser jogada
+    /// fora no mesmo instante: alguma coisa ainda pode estar desenhando uma
+    /// figura de la, e solta-la faria o desenho sumir da tela — sem erro, sem
+    /// travamento, e longe da causa.
+    ///
+    /// Entao cada uma espera alguns quadros aqui antes de ir embora. Guardar
+    /// o SWF de forma forte e de proposito: e o que garante que a entrada
+    /// ainda esteja no mapa quando chegar a hora de remove-la.
+    #[collect(require_static)]
+    a_liberar: Vec<(Arc<SwfMovie>, u8)>,
 }
 
 impl<'gc> Library<'gc> {
     pub fn empty() -> Self {
         Self {
             movie_libraries: MovieLibraries::new(),
+            a_liberar: Vec::new(),
             device_fonts: Default::default(),
             global_fonts: Default::default(),
             font_lookup_cache: Default::default(),
@@ -492,6 +506,47 @@ impl<'gc> Library<'gc> {
             figuras += lib.characters.len();
         }
         (swfs, figuras)
+    }
+
+    /// Marca a biblioteca de um SWF pra ser solta daqui a alguns quadros.
+    ///
+    /// Chamada quando o jogo descarrega o que tinha carregado. Marcar duas
+    /// vezes o mesmo SWF nao reinicia a espera — senao um jogo que
+    /// descarregasse em rajada adiaria a limpeza pra sempre.
+    pub fn agendar_liberacao(&mut self, movie: Arc<SwfMovie>) {
+        /// Um segundo a 25 quadros por segundo. Tempo de sobra pro quadro em
+        /// andamento terminar de desenhar o que ainda usava as figuras.
+        const ESPERA: u8 = 25;
+
+        if self.a_liberar.iter().any(|(m, _)| Arc::ptr_eq(m, &movie)) {
+            return;
+        }
+        self.a_liberar.push((movie, ESPERA));
+    }
+
+    /// Solta as que ja esperaram. Chamada uma vez por quadro.
+    ///
+    /// Soltar a biblioteca derruba as figuras dela, e com elas as texturas na
+    /// placa de video. E o unico lugar onde essa memoria volta.
+    pub fn liberar_vencidos(&mut self) {
+        if self.a_liberar.is_empty() {
+            return;
+        }
+
+        let mut prontas = Vec::new();
+        self.a_liberar.retain_mut(|(movie, faltam)| {
+            if *faltam == 0 {
+                prontas.push(movie.clone());
+                false
+            } else {
+                *faltam -= 1;
+                true
+            }
+        });
+
+        for movie in prontas {
+            self.movie_libraries.0.remove(&movie);
+        }
     }
 
     pub fn library_for_movie(&self, movie: Arc<SwfMovie>) -> Option<&MovieLibrary<'gc>> {
