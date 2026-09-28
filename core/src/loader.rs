@@ -338,6 +338,12 @@ impl<'gc> LoadManager<'gc> {
         (total, sem_clipe, pendentes)
     }
 
+    /// Quantos registros ainda seguram um SWF. Depois do conserto tem que
+    /// ser zero, mesmo com muitos registros guardados.
+    pub fn segurando(&self) -> usize {
+        self.0.iter().filter(|(_, l)| l.movie.is_some()).count()
+    }
+
     /// Remove a completed loader.
     /// This is used to remove a loader after the loading or unloading process has completed.
     pub fn remove_loader(&mut self, handle: LoaderHandle) {
