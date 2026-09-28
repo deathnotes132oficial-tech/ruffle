@@ -112,6 +112,15 @@ impl<'gc> BitmapCharacter<'gc> {
         Ok(new_handle)
     }
 
+    /// Quantos bytes os dados comprimidos desta imagem ocupam.
+    ///
+    /// Isto NAO e a textura: e o original, guardado pra poder recriar a
+    /// textura depois de solta. Fica vivo enquanto o SWF viver, e e um dos
+    /// lugares onde a memoria pode estar escondida do lado da CPU.
+    pub fn peso_comprimido(&self) -> usize {
+        self.compressed.peso_comprimido()
+    }
+
     /// Quantos bytes a textura desta imagem ocupa, se ela estiver viva.
     pub fn textura_viva(&self) -> Option<usize> {
         self.handle.borrow().as_ref().map(|_| self.peso_da_textura())
@@ -170,6 +179,16 @@ impl CompressedBitmap {
             },
         }
     }
+    /// O tamanho dos dados comprimidos, como eles estao guardados.
+    pub fn peso_comprimido(&self) -> usize {
+        match self {
+            CompressedBitmap::Jpeg { data, alpha, .. } => {
+                data.len() + alpha.as_ref().map_or(0, |a| a.len())
+            }
+            CompressedBitmap::Lossless(sem_perda) => sem_perda.data.len(),
+        }
+    }
+
     pub fn decode(&self) -> Result<RenderBitmap<'static>, RenderError> {
         match self {
             CompressedBitmap::Jpeg {
