@@ -308,6 +308,14 @@ enum RunState {
     Stepping,
 }
 
+/// QUANTO TEMPO UMA IMAGEM PODE FICAR PARADA ANTES DE PERDER A TEXTURA.
+///
+/// Vinte segundos e folgado de proposito. Trocar de tela e voltar logo em
+/// seguida nao pode custar uma recriacao: o preco de soltar cedo demais e
+/// engasgo visivel, que e pior do que o problema. Vinte segundos so alcanca
+/// tela que o jogador realmente deixou pra tras.
+const PRAZO_DA_TEXTURA: u64 = 20;
+
 pub struct Player {
     /// The version of the player we're emulating.
     ///
@@ -559,6 +567,8 @@ impl Player {
         thread_local! {
             static ULTIMA_CONTAGEM: std::cell::Cell<Option<Instant>> =
                 const { std::cell::Cell::new(None) };
+            static INICIO: std::cell::Cell<Option<Instant>> =
+                const { std::cell::Cell::new(None) };
         }
         let agora = Instant::now();
         let medir = ULTIMA_CONTAGEM.with(|u| match u.get() {
@@ -567,15 +577,39 @@ impl Player {
         });
         if medir {
             ULTIMA_CONTAGEM.with(|u| u.set(Some(agora)));
-            let (swfs, figuras, um, dois, muitos, carregando, sem_clipe, pendentes) = self
-                .mutate_with_update_context(|context| {
+
+            // Acerta o relogio das texturas e passa a vassoura.
+            let inicio = INICIO.with(|i| {
+                if i.get().is_none() {
+                    i.set(Some(agora));
+                }
+                i.get().unwrap()
+            });
+            crate::character::marcar_o_tempo(agora.duration_since(inicio).as_secs());
+
+            let (swfs, figuras, um, dois, muitos, carregando, sem_clipe, pendentes, tex, tex_mb, soltas_mb) =
+                self.mutate_with_update_context(|context| {
                     context.library.limpar_mortas();
+                    let (_, soltas) = context.library.soltar_texturas_paradas(PRAZO_DA_TEXTURA);
                     let (a, b, c, d, e) = context.library.contagem();
                     let (f, g, h) = context.load_manager.contagem();
-                    (a, b, c, d, e, f, g, h)
+                    let (tex, peso) = context.library.texturas();
+                    (
+                        a,
+                        b,
+                        c,
+                        d,
+                        e,
+                        f,
+                        g,
+                        h,
+                        tex,
+                        peso / (1024 * 1024),
+                        soltas / (1024 * 1024),
+                    )
                 });
             tracing::warn!(
-                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregando} sem-clipe {sem_clipe} pendentes {pendentes}"
+                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregando} sem-clipe {sem_clipe} pendentes {pendentes} | texturas {tex} ({tex_mb} MB) soltas {soltas_mb} MB"
             );
         }
 
@@ -1040,13 +1074,21 @@ impl Player {
     /// quantos deles ainda seguram um SWF. O aplicativo de iPhone anota isso
     /// no registro que o testador copia — no navegador os mesmos numeros
     /// aparecem numa caixa na tela.
-    pub fn contagem_biblioteca(&mut self) -> (usize, usize, usize, usize) {
+    pub fn contagem_biblioteca(&mut self) -> (usize, usize, usize, usize, usize, usize) {
         self.mutate_with_update_context(|context| {
             context.library.limpar_mortas();
             let (swfs, figuras, _, _, _) = context.library.contagem();
             let (carregamentos, _, _) = context.load_manager.contagem();
             let segurando = context.load_manager.segurando();
-            (swfs, figuras, carregamentos, segurando)
+            let (texturas, peso) = context.library.texturas();
+            (
+                swfs,
+                figuras,
+                carregamentos,
+                segurando,
+                texturas,
+                peso / (1024 * 1024),
+            )
         })
     }
 
