@@ -120,7 +120,14 @@ impl<'gc> Avm2ClassRegistry<'gc> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct MovieLibrary<'gc> {
-    swf: Arc<SwfMovie>,
+    /// FRACA, E ISSO E O PONTO.
+    ///
+    /// Esta biblioteca vive num mapa cuja CHAVE e um Weak deste mesmo SWF —
+    /// desenhado assim pra que a entrada suma quando ninguem mais precisar
+    /// dele. Guardando aqui um Arc, a entrada mantinha viva a propria chave e
+    /// nunca podia morrer: todo SWF ja carregado ficava pra sempre.
+    #[collect(require_static)]
+    swf: Weak<SwfMovie>,
     characters: HashMap<CharacterId, Character<'gc>>,
     export_characters: Avm1PropertyMap<'gc, CharacterId>,
     imported_assets: HashMap<AvmString<'gc>, CharacterId>,
@@ -132,7 +139,7 @@ pub struct MovieLibrary<'gc> {
 impl<'gc> MovieLibrary<'gc> {
     pub fn new(swf: Arc<SwfMovie>) -> Self {
         Self {
-            swf,
+            swf: Arc::downgrade(&swf),
             characters: HashMap::new(),
             imported_assets: HashMap::new(),
             export_characters: Avm1PropertyMap::new(),
@@ -262,9 +269,12 @@ impl<'gc> MovieLibrary<'gc> {
     ) -> Option<DisplayObject<'gc>> {
         match character {
             Character::Bitmap(bitmap) => {
+                // Quem chegou ate aqui veio por um Arc vivo do SWF, entao esta
+                // subida nao falha. Falhando, nao havia de onde instanciar.
+                let swf = self.swf.upgrade()?;
                 let avm2_class = bitmap.avm2_class();
                 let bitmap = bitmap.compressed().decode().unwrap();
-                let bitmap = Bitmap::new(mc, id, bitmap, self.swf.clone());
+                let bitmap = Bitmap::new(mc, id, bitmap, swf);
                 bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                 Some(bitmap.instantiate(mc).into())
             }
@@ -493,6 +503,16 @@ impl<'gc> Library<'gc> {
             figuras += lib.characters.len();
         }
         (swfs, figuras)
+    }
+
+    /// Varre as bibliotecas cujo SWF ja morreu.
+    ///
+    /// Seguro por construcao: so sai daqui quem ja nao tem mais ninguem
+    /// apontando. Nao ha escolha de momento, e nao ha como tirar da frente
+    /// algo que ainda esta em uso — foi exatamente o que derrubou a tentativa
+    /// anterior, que soltava no Loader.unload().
+    pub fn limpar_mortas(&mut self) {
+        self.movie_libraries.0.remove_expired();
     }
 
     pub fn library_for_movie(&self, movie: Arc<SwfMovie>) -> Option<&MovieLibrary<'gc>> {
