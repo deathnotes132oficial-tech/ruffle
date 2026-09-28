@@ -550,6 +550,28 @@ impl Player {
             return;
         }
 
+        // SONDA TEMPORARIA — o crescimento da memoria no DDTank.
+        //
+        // De dois em dois segundos, quantos SWFs estao carregados e quantas
+        // figuras eles somam. Abrir e fechar a mesma tela varias vezes
+        // responde a pergunta inteira: se os numeros so sobem, o que o jogo
+        // manda descarregar nunca e liberado.
+        thread_local! {
+            static ULTIMA_CONTAGEM: std::cell::Cell<Option<Instant>> =
+                const { std::cell::Cell::new(None) };
+        }
+        let agora = Instant::now();
+        let medir = ULTIMA_CONTAGEM.with(|u| match u.get() {
+            Some(antes) => agora.duration_since(antes).as_secs() >= 2,
+            None => true,
+        });
+        if medir {
+            ULTIMA_CONTAGEM.with(|u| u.set(Some(agora)));
+            let (swfs, figuras) =
+                self.mutate_with_update_context(|context| context.library.contagem());
+            tracing::warn!("BIBLIOTECA: {swfs} swfs | {figuras} figuras");
+        }
+
         self.frame_accumulator += dt;
         let frame_duration = self.frame_duration();
 
