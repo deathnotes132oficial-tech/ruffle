@@ -441,6 +441,35 @@ impl<'gc> MovieLibraries<'gc> {
     }
 }
 
+/// UMA FOTO DE TUDO O QUE A BIBLIOTECA GUARDA.
+///
+/// Existe porque medir uma coisa por compilacao sai caro pra quem testa: cada
+/// numero novo custa uma viagem aos testadores e uma sessao de jogo. Entao
+/// todos os candidatos saem juntos, e a conta de qual deles cresceu vira
+/// leitura, nao mais uma rodada.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Detalhe {
+    pub swfs: usize,
+    pub figuras: usize,
+    /// Malhas montadas, e as malhas extras por escala ao lado delas.
+    pub malhas: usize,
+    pub escalas: usize,
+    /// Texturas vivas, e o peso delas.
+    pub texturas: usize,
+    pub texturas_bytes: usize,
+    /// Os dois guardados do lado da CPU: os bytes dos SWFs e os das imagens
+    /// comprimidas. Vivem enquanto o SWF viver.
+    pub swf_bytes: usize,
+    pub imagem_bytes: usize,
+    /// O que as figuras SAO. "Figuras" sozinho nunca disse qual tipo cresceu.
+    pub graficos: usize,
+    pub bitmaps: usize,
+    pub sons: usize,
+    pub fontes: usize,
+    pub clipes: usize,
+    pub outros: usize,
+}
+
 /// Symbol library for multiple movies.
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -517,6 +546,47 @@ impl<'gc> Library<'gc> {
         }
 
         (swfs, figuras, um, dois, muitos)
+    }
+
+    /// Tira a foto inteira, de uma passada so pelas figuras.
+    ///
+    /// Uma passada porque sao dezenas de milhares de figuras e isto roda de
+    /// dois em dois segundos; varrer a lista uma vez por pergunta seria
+    /// desperdicio visivel.
+    pub fn detalhe(&self) -> Detalhe {
+        let mut d = Detalhe::default();
+
+        for (movie, lib) in self.movie_libraries.0.iter() {
+            d.swfs += 1;
+            d.swf_bytes += movie.data().len();
+            d.figuras += lib.characters.len();
+
+            for figura in lib.characters.values() {
+                match figura {
+                    Character::Graphic(forma) => {
+                        d.graficos += 1;
+                        if forma.malha_viva() {
+                            d.malhas += 1;
+                        }
+                        d.escalas += forma.escalas_extras();
+                    }
+                    Character::Bitmap(imagem) => {
+                        d.bitmaps += 1;
+                        d.imagem_bytes += imagem.peso_comprimido();
+                        if let Some(bytes) = imagem.textura_viva() {
+                            d.texturas += 1;
+                            d.texturas_bytes += bytes;
+                        }
+                    }
+                    Character::Sound(_) => d.sons += 1,
+                    Character::Font(_) => d.fontes += 1,
+                    Character::MovieClip(_) => d.clipes += 1,
+                    _ => d.outros += 1,
+                }
+            }
+        }
+
+        d
     }
 
     /// Quantas formas tem malha montada, e quantas malhas extras existem.
