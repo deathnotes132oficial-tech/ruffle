@@ -568,29 +568,38 @@ impl<'gc> LoadManager<'gc> {
         }
         let handles: Vec<_> = context.load_manager.0.iter().map(|(h, _)| h).collect();
         for handle in handles {
-            // CARREGAMENTO CUJO ALVO NAO E UM MOVIECLIP.
+            // APOSENTAR PELO AVISO DE CONCLUSAO, NAO PELO CLIPE.
             //
-            // Uma imagem, por exemplo: o alvo dela e um Bitmap. Esses ja
-            // disparam os proprios eventos assim que terminam (ver
-            // movie_loader_complete, no ramo `dobj.as_movie_clip().is_none()`),
-            // entao nao ha o que esperar deles aqui.
+            // A verificacao original exige que o clipe alvo tenha INICIADO, e
+            // um clipe so inicia rodando quadro, o que so acontece se ele
+            // estiver na tela. O DDTank carrega centenas de icones sem nunca
+            // por o carregador na tela: pega o conteudo e usa direto.
             //
-            // So que a condicao abaixo exige um MovieClip, e sem isto eles
-            // nunca eram removidos: cada um ficava no gerenciador pra sempre
-            // segurando o proprio SWF, que segurava a biblioteca dele, que
-            // segurava todas as figuras decodificadas.
+            // Esses carregamentos terminam, avisam o jogo (por outro caminho,
+            // em movie_loader_complete) e ficam presos aqui pra sempre. Cada
+            // um segura o proprio SWF, que segura a biblioteca dele, que
+            // segura todas as figuras decodificadas. Medido no jogo: 267
+            // presos, TODOS por este motivo, e nenhum por outro.
             //
-            // No DDTank isso era o vazamento inteiro. Os icones dos itens sao
-            // PNG; abrir a mochila carregava uns 150, e nenhum saia. Uma
-            // sessao chegou a 827 SWFs presos com 10897 figuras, e a medida de
-            // donos mostrou 794 deles com EXATAMENTE UM dono — este registro.
-            let terminou_sem_clipe = matches!(
-                context.load_manager.get_loader(handle),
-                Some(MovieLoader { target_clip, loader_status, .. })
-                    if target_clip.as_movie_clip().is_none()
-                        && !matches!(loader_status, LoaderStatus::Pending | LoaderStatus::Parsing)
-            );
-            if terminou_sem_clipe {
+            // Entao a pergunta certa nao e "o clipe iniciou?" e sim "o aviso
+            // de conclusao ja foi dado?". Quem responde isso e o proprio
+            // LoaderInfo, e a resposta dele e a mesma que a verificacao
+            // abaixo consulta — so que sem depender da tela.
+            //
+            // Nao ha risco de aposentar cedo demais: por dentro, o aviso so
+            // sai quando o carregamento realmente acabou. Se ainda nao
+            // acabou, ele devolve falso e o registro fica onde esta.
+            let terminado = match context.load_manager.get_loader(handle) {
+                Some(MovieLoader {
+                    loader_status,
+                    vm_data: MovieLoaderVMData::Avm2 { loader_info, .. },
+                    ..
+                }) if matches!(loader_status, LoaderStatus::Succeeded) => Some(*loader_info),
+                _ => None,
+            };
+            if let Some(loader_info) = terminado
+                && loader_info.fire_init_and_complete_events(context, 0, false)
+            {
                 context.load_manager.remove_loader(handle);
                 continue;
             }
