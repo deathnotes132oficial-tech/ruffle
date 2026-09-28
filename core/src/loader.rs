@@ -266,6 +266,9 @@ impl<'gc> LoadManager<'gc> {
         let mut fora_da_tela = 0;
         let mut por_estado = [0usize; 4];
         let mut exemplos: Vec<String> = Vec::new();
+        // Quantos registros ainda seguram um SWF. Depois do conserto isto tem
+        // que ficar perto de zero mesmo com muitos registros guardados.
+        let mut segurando = 0;
 
         for (_, loader) in self.0.iter() {
             total += 1;
@@ -307,6 +310,10 @@ impl<'gc> LoadManager<'gc> {
 
             // Tres enderecos bastam pra saber QUE conteudo fica preso —
             // icone, modulo, mapa. Mais que isso so enche o console.
+            if loader.movie.is_some() {
+                segurando += 1;
+            }
+
             if exemplos.len() < 3
                 && let Some(movie) = &loader.movie
             {
@@ -317,7 +324,7 @@ impl<'gc> LoadManager<'gc> {
         }
 
         tracing::warn!(
-            "CARREGAMENTOS: {total} presos | fora da tela {fora_da_tela} | \
+            "CARREGAMENTOS: {total} presos | segurando swf {segurando} | fora da tela {fora_da_tela} | \
              sem clipe {sem_clipe} sem iniciar {sem_iniciar} construtor {construtor_falhou} \
              sem info {sem_info} prontos {prontos} | \
              estados pendente {} parsing {} sucesso {} falha {} | exemplos {:?}",
@@ -568,42 +575,6 @@ impl<'gc> LoadManager<'gc> {
         }
         let handles: Vec<_> = context.load_manager.0.iter().map(|(h, _)| h).collect();
         for handle in handles {
-            // APOSENTAR PELO AVISO DE CONCLUSAO, NAO PELO CLIPE.
-            //
-            // A verificacao original exige que o clipe alvo tenha INICIADO, e
-            // um clipe so inicia rodando quadro, o que so acontece se ele
-            // estiver na tela. O DDTank carrega centenas de icones sem nunca
-            // por o carregador na tela: pega o conteudo e usa direto.
-            //
-            // Esses carregamentos terminam, avisam o jogo (por outro caminho,
-            // em movie_loader_complete) e ficam presos aqui pra sempre. Cada
-            // um segura o proprio SWF, que segura a biblioteca dele, que
-            // segura todas as figuras decodificadas. Medido no jogo: 267
-            // presos, TODOS por este motivo, e nenhum por outro.
-            //
-            // Entao a pergunta certa nao e "o clipe iniciou?" e sim "o aviso
-            // de conclusao ja foi dado?". Quem responde isso e o proprio
-            // LoaderInfo, e a resposta dele e a mesma que a verificacao
-            // abaixo consulta — so que sem depender da tela.
-            //
-            // Nao ha risco de aposentar cedo demais: por dentro, o aviso so
-            // sai quando o carregamento realmente acabou. Se ainda nao
-            // acabou, ele devolve falso e o registro fica onde esta.
-            let terminado = match context.load_manager.get_loader(handle) {
-                Some(MovieLoader {
-                    loader_status,
-                    vm_data: MovieLoaderVMData::Avm2 { loader_info, .. },
-                    ..
-                }) if matches!(loader_status, LoaderStatus::Succeeded) => Some(*loader_info),
-                _ => None,
-            };
-            if let Some(loader_info) = terminado
-                && loader_info.fire_init_and_complete_events(context, 0, false)
-            {
-                context.load_manager.remove_loader(handle);
-                continue;
-            }
-
             if let Some(MovieLoader { target_clip, .. }) = context.load_manager.get_loader(handle)
                 && let Some(movie) = target_clip.as_movie_clip()
                 && movie.try_fire_loaderinfo_events(context)
@@ -2332,6 +2303,25 @@ impl<'gc> MovieLoader<'gc> {
 
         let loader = uc.load_manager.get_loader_mut(handle).unwrap();
         loader.loader_status = LoaderStatus::Succeeded;
+
+        // E SOLTA O SWF QUE ESTE REGISTRO GUARDAVA.
+        //
+        // O campo existe so pra travessia do preload — ele proprio diz isso
+        // na documentacao logo acima da declaracao — e o preload so roda
+        // enquanto o status e Parsing. Daqui em diante ninguem mais o le.
+        //
+        // Segurando, ele era o unico dono do SWF, e um SWF vivo mantem viva a
+        // biblioteca dele, com todas as figuras decodificadas e as texturas.
+        // Medido no DDTank: 441 registros presos, 447 SWFs com exatamente um
+        // dono, nenhum com dois. Os numeros sao a mesma coisa contada de dois
+        // lados.
+        //
+        // Por que aqui e nao aposentando o registro: aposentar depende de o
+        // aviso de conclusao ter saido, e esse aviso depende de o conteudo
+        // ter sido processado, que so acontece na tela. O jogo carrega
+        // centenas de icones sem nunca por o carregador na tela. Soltar o SWF
+        // nao depende de nada disso e nao muda evento nenhum.
+        loader.movie = None;
 
         Ok(())
     }
