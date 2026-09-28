@@ -550,12 +550,6 @@ impl Player {
             return;
         }
 
-        // O COLETOR ADIADO, UMA VEZ POR QUADRO.
-        //
-        // Ele so faz alguma coisa quando ha biblioteca esperando, entao no
-        // quadro comum custa uma comparacao.
-        self.mutate_with_update_context(|context| context.library.liberar_vencidos());
-
         // SONDA TEMPORARIA — o crescimento da memoria no DDTank.
         //
         // De dois em dois segundos, quantos SWFs estao carregados e quantas
