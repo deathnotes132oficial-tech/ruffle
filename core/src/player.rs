@@ -567,13 +567,15 @@ impl Player {
         });
         if medir {
             ULTIMA_CONTAGEM.with(|u| u.set(Some(agora)));
-            let (swfs, figuras, um, dois, muitos) =
-                self.mutate_with_update_context(|context| {
+            let (swfs, figuras, um, dois, muitos, carregando, sem_clipe, pendentes) = self
+                .mutate_with_update_context(|context| {
                     context.library.limpar_mortas();
-                    context.library.contagem()
+                    let (a, b, c, d, e) = context.library.contagem();
+                    let (f, g, h) = context.load_manager.contagem();
+                    (a, b, c, d, e, f, g, h)
                 });
             tracing::warn!(
-                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos}"
+                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos}                  | carregamentos {carregando} sem-clipe {sem_clipe} pendentes {pendentes}"
             );
         }
 
