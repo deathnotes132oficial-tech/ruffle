@@ -587,20 +587,8 @@ impl Player {
             });
             crate::character::marcar_o_tempo(agora.duration_since(inicio).as_secs());
 
-            let (swfs, figuras, carregando, pendentes, tex, tex_mb, malhas, extras, soltas) =
-                self.mutate_with_update_context(|context| {
-                    context.library.limpar_mortas();
-                    context.library.soltar_texturas_paradas(PRAZO_DA_TEXTURA);
-                    let soltas = context.library.soltar_malhas_paradas(PRAZO_DA_TEXTURA);
-                    let (a, b, _, _, _) = context.library.contagem();
-                    let (c, _, d) = context.load_manager.contagem();
-                    let (tex, peso) = context.library.texturas();
-                    let (malhas, extras) = context.library.malhas();
-                    (a, b, c, d, tex, peso / (1024 * 1024), malhas, extras, soltas)
-                });
-            tracing::warn!(
-                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | carregamentos {carregando} pendentes {pendentes} | texturas {tex} ({tex_mb} MB) | malhas {malhas} extras {extras} soltas {soltas}"
-            );
+            let linha = self.contagem_biblioteca();
+            tracing::warn!("BIBLIOTECA: {linha}");
         }
 
         self.frame_accumulator += dt;
@@ -1060,26 +1048,46 @@ impl Player {
 
     /// Os contadores da investigacao de memoria, pra quem esta de fora.
     ///
-    /// Devolve: SWFs vivos, figuras registradas, carregamentos guardados e
-    /// quantos deles ainda seguram um SWF. O aplicativo de iPhone anota isso
-    /// no registro que o testador copia — no navegador os mesmos numeros
-    /// aparecem numa caixa na tela.
-    pub fn contagem_biblioteca(&mut self) -> (usize, usize, usize, usize, usize, usize, usize) {
+    /// Devolve a linha JA PRONTA, em vez de um punhado de numeros.
+    ///
+    /// Assim acrescentar uma medida mexe neste arquivo e mais nenhum: o
+    /// aplicativo de iPhone so pega o texto e escreve no registro que o
+    /// testador copia. Antes, cada numero novo obrigava a mexer nos dois
+    /// lados, e um deles nem e deste repositorio.
+    ///
+    /// Tambem e aqui que a vassoura passa, porque este e o unico ponto que
+    /// roda de tempos em tempos com a biblioteca em maos.
+    pub fn contagem_biblioteca(&mut self) -> String {
         self.mutate_with_update_context(|context| {
             context.library.limpar_mortas();
-            let (swfs, figuras, _, _, _) = context.library.contagem();
+            context.library.soltar_texturas_paradas(PRAZO_DA_TEXTURA);
+            let malhas_soltas = context.library.soltar_malhas_paradas(PRAZO_DA_TEXTURA);
+
+            let d = context.library.detalhe();
             let (carregamentos, _, _) = context.load_manager.contagem();
             let segurando = context.load_manager.segurando();
-            let (texturas, peso) = context.library.texturas();
-            let (malhas, _) = context.library.malhas();
-            (
-                swfs,
-                figuras,
-                carregamentos,
-                segurando,
-                texturas,
-                peso / (1024 * 1024),
-                malhas,
+
+            let mb = |bytes: usize| bytes / (1024 * 1024);
+
+            format!(
+                "swfs {} figuras {} carreg {carregamentos} segurando {segurando} \
+                 | texturas {} ({} MB) malhas {} escalas {} soltas {malhas_soltas} \
+                 | swf {} MB imagens {} MB \
+                 | graficos {} bitmaps {} sons {} fontes {} clipes {} outros {}",
+                d.swfs,
+                d.figuras,
+                d.texturas,
+                mb(d.texturas_bytes),
+                d.malhas,
+                d.escalas,
+                mb(d.swf_bytes),
+                mb(d.imagem_bytes),
+                d.graficos,
+                d.bitmaps,
+                d.sons,
+                d.fontes,
+                d.clipes,
+                d.outros,
             )
         })
     }
