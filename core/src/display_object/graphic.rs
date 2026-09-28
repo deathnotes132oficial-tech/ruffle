@@ -18,7 +18,7 @@ use gc_arena::{Collect, Gc, Mutation};
 use ruffle_common::utils::HasPrefixField;
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::commands::CommandHandler;
-use std::cell::{OnceCell, RefCell, RefMut};
+use std::cell::{Cell, OnceCell, RefCell, RefMut};
 use std::sync::Arc;
 
 #[derive(Clone, Collect, Copy)]
@@ -53,16 +53,14 @@ impl<'gc> Graphic<'gc> {
         swf_shape: swf::Shape,
         movie: Arc<SwfMovie>,
     ) -> Self {
-        let library = context.library.library_for_movie(movie.clone()).unwrap();
         let shared = GraphicShared {
             id: swf_shape.id,
             shape_bounds: swf_shape.shape_bounds,
             edge_bounds: swf_shape.edge_bounds,
-            render_handle: Some(
-                context
-                    .renderer
-                    .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
-            ),
+            // Nada de montar malha aqui. Quem monta e o primeiro desenho.
+            render_handle: RefCell::new(None),
+            tem_forma: true,
+            usado_em: Cell::new(crate::character::agora()),
             shape: swf_shape,
             movie,
             scaled_handle: RefCell::new(TessellationCache::new()),
@@ -86,7 +84,9 @@ impl<'gc> Graphic<'gc> {
             id: 0,
             shape_bounds: Default::default(),
             edge_bounds: Default::default(),
-            render_handle: None,
+            render_handle: RefCell::new(None),
+            tem_forma: false,
+            usado_em: Cell::new(0),
             shape: swf::Shape {
                 version: 32,
                 id: 0,
@@ -175,6 +175,59 @@ impl<'gc> Graphic<'gc> {
             base_handle.clone()
         }
     }
+
+    /// A malha desta forma, montada agora se for a primeira vez que ela
+    /// aparece.
+    ///
+    /// Tambem e aqui que a forma recebe o carimbo de "fui desenhada" — este e
+    /// o unico caminho por onde uma forma chega na tela, entao nao ha como
+    /// alguem aparecer sem passar por aqui.
+    fn malha_base(self, context: &mut RenderContext) -> Option<ShapeHandle> {
+        let shared = self.0.shared.get();
+        shared.usado_em.set(crate::character::agora());
+
+        if !shared.tem_forma {
+            return None;
+        }
+
+        if let Some(pronta) = shared.render_handle.borrow().as_ref() {
+            return Some(pronta.clone());
+        }
+
+        let library = context.library.library_for_movie(shared.movie.clone())?;
+        let nova = context
+            .renderer
+            .register_shape((&shared.shape).into(), &MovieLibrarySource { library });
+        *shared.render_handle.borrow_mut() = Some(nova.clone());
+        Some(nova)
+    }
+
+    /// Se esta forma tem malha montada agora.
+    pub fn malha_viva(self) -> bool {
+        self.0.shared.get().render_handle.borrow().is_some()
+    }
+
+    /// Quantas malhas extras (uma por escala ja desenhada) ela guarda.
+    pub fn escalas_extras(self) -> usize {
+        self.0.shared.get().scaled_handle.borrow().len()
+    }
+
+    /// Solta a malha se ninguem desenhou esta forma nos ultimos `prazo`
+    /// segundos. Devolve se soltou.
+    pub fn soltar_malha_se_parada(self, prazo: u64) -> bool {
+        let shared = self.0.shared.get();
+
+        if shared.render_handle.borrow().is_none() {
+            return false;
+        }
+        if crate::character::agora().saturating_sub(shared.usado_em.get()) < prazo {
+            return false;
+        }
+
+        *shared.render_handle.borrow_mut() = None;
+        shared.scaled_handle.borrow_mut().limpar();
+        true
+    }
 }
 
 impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
@@ -255,7 +308,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 
         if let Some(drawing) = self.0.drawing.get() {
             drawing.borrow().render(context);
-        } else if let Some(base_handle) = self.0.shared.get().render_handle.clone() {
+        } else if let Some(base_handle) = self.malha_base(context) {
             let transform = context.transform_stack.transform();
 
             // Calculate the current scale from the transform, to determine if
@@ -338,7 +391,21 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 struct GraphicShared {
     id: CharacterId,
     shape: swf::Shape,
-    render_handle: Option<ShapeHandle>,
+    /// A MALHA DESTA FORMA, MONTADA SO QUANDO ELA APARECE.
+    ///
+    /// Antes ela era montada na leitura do arquivo, e ficava pra sempre. Toda
+    /// forma de todo SWF virava malha na memoria grafica mesmo sem nunca
+    /// chegar na tela — e cada malha segura junto as texturas que ela pinta.
+    /// Era ai que estava a memoria, e nao nas texturas soltas da biblioteca.
+    #[collect(require_static)]
+    render_handle: RefCell<Option<ShapeHandle>>,
+    /// Se esta forma tem desenho de verdade. A forma vazia nao tem, e tentar
+    /// montar malha dela seria trabalho por nada a cada varredura.
+    tem_forma: bool,
+    /// Quando esta forma foi desenhada pela ultima vez, no relogio das
+    /// texturas — o mesmo, de proposito, pra haver um so.
+    #[collect(require_static)]
+    usado_em: Cell<u64>,
     shape_bounds: Rectangle<Twips>,
     edge_bounds: Rectangle<Twips>,
     movie: Arc<SwfMovie>,
