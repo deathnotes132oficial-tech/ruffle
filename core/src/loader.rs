@@ -243,6 +243,30 @@ impl<'gc> LoadManager<'gc> {
         handle
     }
 
+    /// SONDA TEMPORARIA — quantos carregamentos estao guardados, e como.
+    ///
+    /// Devolve o total, quantos tem alvo que NAO e MovieClip, e quantos ainda
+    /// nao terminaram. Se o total sobe junto com a mochila, o vazamento esta
+    /// aqui; se fica parado, o dono unico de cada SWF e outra coisa.
+    pub fn contagem(&self) -> (usize, usize, usize) {
+        let mut total = 0;
+        let mut sem_clipe = 0;
+        let mut pendentes = 0;
+        for (_, loader) in self.0.iter() {
+            total += 1;
+            if loader.target_clip.as_movie_clip().is_none() {
+                sem_clipe += 1;
+            }
+            if matches!(
+                loader.loader_status,
+                LoaderStatus::Pending | LoaderStatus::Parsing
+            ) {
+                pendentes += 1;
+            }
+        }
+        (total, sem_clipe, pendentes)
+    }
+
     /// Remove a completed loader.
     /// This is used to remove a loader after the loading or unloading process has completed.
     pub fn remove_loader(&mut self, handle: LoaderHandle) {
