@@ -252,31 +252,82 @@ impl<'gc> LoadManager<'gc> {
         let mut total = 0;
         let mut sem_clipe = 0;
         let mut pendentes = 0;
-        // Das tres exigencias de try_fire_loaderinfo_events, qual falha.
+
+        // TUDO O QUE EU PRECISARIA PERGUNTAR, DE UMA VEZ.
+        //
+        // Cada compilacao custa minutos de quem testa, entao nao da pra medir
+        // uma coisa por vez. Aqui vai o conjunto inteiro: qual das tres
+        // exigencias de try_fire_loaderinfo_events falha, se o alvo esta na
+        // tela, em que estado o carregamento parou, e QUAIS enderecos sao.
         let mut sem_iniciar = 0;
+        let mut construtor_falhou = 0;
         let mut sem_info = 0;
+        let mut prontos = 0;
+        let mut fora_da_tela = 0;
+        let mut por_estado = [0usize; 4];
+        let mut exemplos: Vec<String> = Vec::new();
+
         for (_, loader) in self.0.iter() {
             total += 1;
-            match loader.target_clip.as_movie_clip() {
-                None => sem_clipe += 1,
-                Some(clipe) => {
-                    if !clipe.initialized() || clipe.avm2_constructor_failed() {
-                        sem_iniciar += 1;
-                    } else if clipe.loader_info().is_none() {
-                        sem_info += 1;
-                    }
-                }
-            }
+
+            por_estado[match loader.loader_status {
+                LoaderStatus::Pending => 0,
+                LoaderStatus::Parsing => 1,
+                LoaderStatus::Succeeded => 2,
+                LoaderStatus::Failed => 3,
+            }] += 1;
+
             if matches!(
                 loader.loader_status,
                 LoaderStatus::Pending | LoaderStatus::Parsing
             ) {
                 pendentes += 1;
             }
+
+            if loader.target_clip.parent().is_none() {
+                fora_da_tela += 1;
+            }
+
+            match loader.target_clip.as_movie_clip() {
+                None => sem_clipe += 1,
+                Some(clipe) => {
+                    if !clipe.initialized() {
+                        sem_iniciar += 1;
+                    } else if clipe.avm2_constructor_failed() {
+                        construtor_falhou += 1;
+                    } else if clipe.loader_info().is_none() {
+                        sem_info += 1;
+                    } else {
+                        // Passa nas tres e mesmo assim continua guardado: o
+                        // evento de conclusao e que nao veio.
+                        prontos += 1;
+                    }
+                }
+            }
+
+            // Tres enderecos bastam pra saber QUE conteudo fica preso —
+            // icone, modulo, mapa. Mais que isso so enche o console.
+            if exemplos.len() < 3
+                && let Some(movie) = &loader.movie
+            {
+                let endereco = movie.url();
+                let curto = endereco.rsplit('/').next().unwrap_or(endereco);
+                exemplos.push(curto.chars().take(60).collect());
+            }
         }
+
         tracing::warn!(
-            "CARREGAMENTOS: {total} presos | sem clipe {sem_clipe} | sem iniciar {sem_iniciar} | sem info {sem_info}"
+            "CARREGAMENTOS: {total} presos | fora da tela {fora_da_tela} | \
+             sem clipe {sem_clipe} sem iniciar {sem_iniciar} construtor {construtor_falhou} \
+             sem info {sem_info} prontos {prontos} | \
+             estados pendente {} parsing {} sucesso {} falha {} | exemplos {:?}",
+            por_estado[0],
+            por_estado[1],
+            por_estado[2],
+            por_estado[3],
+            exemplos,
         );
+
         (total, sem_clipe, pendentes)
     }
 
