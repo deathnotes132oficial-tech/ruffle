@@ -567,8 +567,10 @@ impl Player {
         });
         if medir {
             ULTIMA_CONTAGEM.with(|u| u.set(Some(agora)));
-            let (swfs, figuras) =
-                self.mutate_with_update_context(|context| context.library.contagem());
+            let (swfs, figuras) = self.mutate_with_update_context(|context| {
+                context.library.limpar_mortas();
+                context.library.contagem()
+            });
             tracing::warn!("BIBLIOTECA: {swfs} swfs | {figuras} figuras");
         }
 
