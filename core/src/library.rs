@@ -495,14 +495,28 @@ impl<'gc> Library<'gc> {
     /// das figuras dele. O mapa tem CHAVE FRACA, entao a biblioteca deveria
     /// sumir sozinha quando ninguem mais aponta pro SWF. "Deveria" e
     /// justamente o que vale a pena medir antes de escrever um coletor.
-    pub fn contagem(&self) -> (usize, usize) {
+    pub fn contagem(&self) -> (usize, usize, usize, usize, usize) {
         let mut swfs = 0;
         let mut figuras = 0;
-        for (_, lib) in self.movie_libraries.0.iter() {
+        // Quantos SWFs tem exatamente um dono, dois, tres ou mais.
+        let (mut um, mut dois, mut muitos) = (0, 0, 0);
+
+        for (movie, lib) in self.movie_libraries.0.iter() {
             swfs += 1;
             figuras += lib.characters.len();
+
+            // MENOS UM: a propria varredura ergueu esta referencia pra poder
+            // olhar a entrada. Sem descontar, todo SWF pareceria ter um dono
+            // a mais do que tem.
+            let donos = Arc::strong_count(&movie) - 1;
+            match donos {
+                0 | 1 => um += 1,
+                2 => dois += 1,
+                _ => muitos += 1,
+            }
         }
-        (swfs, figuras)
+
+        (swfs, figuras, um, dois, muitos)
     }
 
     /// Varre as bibliotecas cujo SWF ja morreu.
