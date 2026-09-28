@@ -274,6 +274,16 @@ impl<'gc> LoaderInfoObject<'gc> {
 
         let content = loader.child_by_index(0);
 
+        // O SWF QUE ESTAVA CARREGADO, GUARDADO ANTES DE O FLUXO SER TROCADO.
+        //
+        // Dali a duas linhas o fluxo vira um SWF vazio e esta referencia se
+        // perde — e sem ela nao ha como dizer QUAL biblioteca soltar.
+        let descarregado = if content.is_some() {
+            Some(self.loader_stream().movie().clone())
+        } else {
+            None
+        };
+
         if content.is_some() {
             let unload_evt = EventObject::bare_default_event(context, "unload");
             Avm2::dispatch_event(context, unload_evt, self.into());
@@ -290,6 +300,21 @@ impl<'gc> LoaderInfoObject<'gc> {
         // Remove the Loader's content element if it exists.
         if let Some(child) = content {
             loader.remove_child(context, child);
+        }
+
+        // E SOLTA A BIBLIOTECA DELE, DAQUI A ALGUNS QUADROS.
+        //
+        // Sem isto, tirar da tela era tudo o que acontecia: as figuras
+        // decodificadas e as texturas continuavam guardadas pra sempre. Num
+        // jogo que carrega dezenas de telas e um mapa por partida, isso so
+        // cresce.
+        //
+        // O SWF principal nunca e agendado — soltar a biblioteca dele seria
+        // apagar o proprio jogo.
+        if let Some(movie) = descarregado {
+            if !Arc::ptr_eq(&movie, &context.root_swf) {
+                context.library.agendar_liberacao(movie);
+            }
         }
     }
 }
