@@ -587,29 +587,19 @@ impl Player {
             });
             crate::character::marcar_o_tempo(agora.duration_since(inicio).as_secs());
 
-            let (swfs, figuras, um, dois, muitos, carregando, sem_clipe, pendentes, tex, tex_mb, soltas_mb) =
+            let (swfs, figuras, carregando, pendentes, tex, tex_mb, malhas, extras, soltas) =
                 self.mutate_with_update_context(|context| {
                     context.library.limpar_mortas();
-                    let (_, soltas) = context.library.soltar_texturas_paradas(PRAZO_DA_TEXTURA);
-                    let (a, b, c, d, e) = context.library.contagem();
-                    let (f, g, h) = context.load_manager.contagem();
+                    context.library.soltar_texturas_paradas(PRAZO_DA_TEXTURA);
+                    let soltas = context.library.soltar_malhas_paradas(PRAZO_DA_TEXTURA);
+                    let (a, b, _, _, _) = context.library.contagem();
+                    let (c, _, d) = context.load_manager.contagem();
                     let (tex, peso) = context.library.texturas();
-                    (
-                        a,
-                        b,
-                        c,
-                        d,
-                        e,
-                        f,
-                        g,
-                        h,
-                        tex,
-                        peso / (1024 * 1024),
-                        soltas / (1024 * 1024),
-                    )
+                    let (malhas, extras) = context.library.malhas();
+                    (a, b, c, d, tex, peso / (1024 * 1024), malhas, extras, soltas)
                 });
             tracing::warn!(
-                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregando} sem-clipe {sem_clipe} pendentes {pendentes} | texturas {tex} ({tex_mb} MB) soltas {soltas_mb} MB"
+                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | carregamentos {carregando} pendentes {pendentes} | texturas {tex} ({tex_mb} MB) | malhas {malhas} extras {extras} soltas {soltas}"
             );
         }
 
@@ -1074,13 +1064,14 @@ impl Player {
     /// quantos deles ainda seguram um SWF. O aplicativo de iPhone anota isso
     /// no registro que o testador copia — no navegador os mesmos numeros
     /// aparecem numa caixa na tela.
-    pub fn contagem_biblioteca(&mut self) -> (usize, usize, usize, usize, usize, usize) {
+    pub fn contagem_biblioteca(&mut self) -> (usize, usize, usize, usize, usize, usize, usize) {
         self.mutate_with_update_context(|context| {
             context.library.limpar_mortas();
             let (swfs, figuras, _, _, _) = context.library.contagem();
             let (carregamentos, _, _) = context.load_manager.contagem();
             let segurando = context.load_manager.segurando();
             let (texturas, peso) = context.library.texturas();
+            let (malhas, _) = context.library.malhas();
             (
                 swfs,
                 figuras,
@@ -1088,6 +1079,7 @@ impl Player {
                 segurando,
                 texturas,
                 peso / (1024 * 1024),
+                malhas,
             )
         })
     }
