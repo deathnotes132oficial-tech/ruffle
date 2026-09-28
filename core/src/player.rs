@@ -567,11 +567,14 @@ impl Player {
         });
         if medir {
             ULTIMA_CONTAGEM.with(|u| u.set(Some(agora)));
-            let (swfs, figuras) = self.mutate_with_update_context(|context| {
-                context.library.limpar_mortas();
-                context.library.contagem()
-            });
-            tracing::warn!("BIBLIOTECA: {swfs} swfs | {figuras} figuras");
+            let (swfs, figuras, um, dois, muitos) =
+                self.mutate_with_update_context(|context| {
+                    context.library.limpar_mortas();
+                    context.library.contagem()
+                });
+            tracing::warn!(
+                "BIBLIOTECA: {swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos}"
+            );
         }
 
         self.frame_accumulator += dt;
