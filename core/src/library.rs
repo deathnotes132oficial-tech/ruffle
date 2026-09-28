@@ -519,6 +519,43 @@ impl<'gc> Library<'gc> {
         (swfs, figuras, um, dois, muitos)
     }
 
+    /// Quantas texturas estao vivas agora, e quantos bytes elas pesam.
+    pub fn texturas(&self) -> (usize, usize) {
+        let mut quantas = 0;
+        let mut peso = 0;
+        for (_, lib) in self.movie_libraries.0.iter() {
+            for figura in lib.characters.values() {
+                if let Character::Bitmap(bitmap) = figura
+                    && let Some(bytes) = bitmap.textura_viva()
+                {
+                    quantas += 1;
+                    peso += bytes;
+                }
+            }
+        }
+        (quantas, peso)
+    }
+
+    /// Solta a textura de toda imagem parada ha mais de `prazo` segundos.
+    ///
+    /// Devolve quantas soltou e quantos bytes isso representou.
+    pub fn soltar_texturas_paradas(&self, prazo: u64) -> (usize, usize) {
+        let mut quantas = 0;
+        let mut peso = 0;
+        for (_, lib) in self.movie_libraries.0.iter() {
+            for figura in lib.characters.values() {
+                if let Character::Bitmap(bitmap) = figura {
+                    let bytes = bitmap.soltar_se_parada(prazo);
+                    if bytes > 0 {
+                        quantas += 1;
+                        peso += bytes;
+                    }
+                }
+            }
+        }
+        (quantas, peso)
+    }
+
     /// Varre as bibliotecas cujo SWF ja morreu.
     ///
     /// Seguro por construcao: so sai daqui quem ja nao tem mais ninguem
