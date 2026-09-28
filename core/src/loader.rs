@@ -480,6 +480,33 @@ impl<'gc> LoadManager<'gc> {
         }
         let handles: Vec<_> = context.load_manager.0.iter().map(|(h, _)| h).collect();
         for handle in handles {
+            // CARREGAMENTO CUJO ALVO NAO E UM MOVIECLIP.
+            //
+            // Uma imagem, por exemplo: o alvo dela e um Bitmap. Esses ja
+            // disparam os proprios eventos assim que terminam (ver
+            // movie_loader_complete, no ramo `dobj.as_movie_clip().is_none()`),
+            // entao nao ha o que esperar deles aqui.
+            //
+            // So que a condicao abaixo exige um MovieClip, e sem isto eles
+            // nunca eram removidos: cada um ficava no gerenciador pra sempre
+            // segurando o proprio SWF, que segurava a biblioteca dele, que
+            // segurava todas as figuras decodificadas.
+            //
+            // No DDTank isso era o vazamento inteiro. Os icones dos itens sao
+            // PNG; abrir a mochila carregava uns 150, e nenhum saia. Uma
+            // sessao chegou a 827 SWFs presos com 10897 figuras, e a medida de
+            // donos mostrou 794 deles com EXATAMENTE UM dono — este registro.
+            let terminou_sem_clipe = matches!(
+                context.load_manager.get_loader(handle),
+                Some(MovieLoader { target_clip, loader_status, .. })
+                    if target_clip.as_movie_clip().is_none()
+                        && !matches!(loader_status, LoaderStatus::Pending | LoaderStatus::Parsing)
+            );
+            if terminou_sem_clipe {
+                context.load_manager.remove_loader(handle);
+                continue;
+            }
+
             if let Some(MovieLoader { target_clip, .. }) = context.load_manager.get_loader(handle)
                 && let Some(movie) = target_clip.as_movie_clip()
                 && movie.try_fire_loaderinfo_events(context)
