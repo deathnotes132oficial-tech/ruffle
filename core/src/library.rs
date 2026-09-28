@@ -478,6 +478,22 @@ impl<'gc> Library<'gc> {
         }
     }
 
+    /// SONDA TEMPORARIA — quantos SWFs carregados, e quantas figuras ao todo.
+    ///
+    /// Cada SWF que o jogo carrega ganha aqui uma biblioteca com o catalogo
+    /// das figuras dele. O mapa tem CHAVE FRACA, entao a biblioteca deveria
+    /// sumir sozinha quando ninguem mais aponta pro SWF. "Deveria" e
+    /// justamente o que vale a pena medir antes de escrever um coletor.
+    pub fn contagem(&self) -> (usize, usize) {
+        let mut swfs = 0;
+        let mut figuras = 0;
+        for (_, lib) in self.movie_libraries.0.iter() {
+            swfs += 1;
+            figuras += lib.characters.len();
+        }
+        (swfs, figuras)
+    }
+
     pub fn library_for_movie(&self, movie: Arc<SwfMovie>) -> Option<&MovieLibrary<'gc>> {
         self.movie_libraries.get(&movie)
     }
