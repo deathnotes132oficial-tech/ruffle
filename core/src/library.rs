@@ -519,6 +519,38 @@ impl<'gc> Library<'gc> {
         (swfs, figuras, um, dois, muitos)
     }
 
+    /// Quantas formas tem malha montada, e quantas malhas extras existem.
+    pub fn malhas(&self) -> (usize, usize) {
+        let mut vivas = 0;
+        let mut extras = 0;
+        for (_, lib) in self.movie_libraries.0.iter() {
+            for figura in lib.characters.values() {
+                if let Character::Graphic(forma) = figura {
+                    if forma.malha_viva() {
+                        vivas += 1;
+                    }
+                    extras += forma.escalas_extras();
+                }
+            }
+        }
+        (vivas, extras)
+    }
+
+    /// Solta a malha de toda forma parada ha mais de `prazo` segundos.
+    pub fn soltar_malhas_paradas(&self, prazo: u64) -> usize {
+        let mut soltas = 0;
+        for (_, lib) in self.movie_libraries.0.iter() {
+            for figura in lib.characters.values() {
+                if let Character::Graphic(forma) = figura
+                    && forma.soltar_malha_se_parada(prazo)
+                {
+                    soltas += 1;
+                }
+            }
+        }
+        soltas
+    }
+
     /// Quantas texturas estao vivas agora, e quantos bytes elas pesam.
     pub fn texturas(&self) -> (usize, usize) {
         let mut quantas = 0;
