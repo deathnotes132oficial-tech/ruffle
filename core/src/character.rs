@@ -31,7 +31,7 @@ pub fn marcar_o_tempo(segundos: u64) {
     RELOGIO.store(segundos, Ordering::Relaxed);
 }
 
-fn agora() -> u64 {
+pub fn agora() -> u64 {
     RELOGIO.load(Ordering::Relaxed)
 }
 
