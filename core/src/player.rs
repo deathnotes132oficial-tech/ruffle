@@ -1034,6 +1034,22 @@ impl Player {
         self.mutate_with_update_context(|context| context.stage.quality())
     }
 
+    /// Os contadores da investigacao de memoria, pra quem esta de fora.
+    ///
+    /// Devolve: SWFs vivos, figuras registradas, carregamentos guardados e
+    /// quantos deles ainda seguram um SWF. O aplicativo de iPhone anota isso
+    /// no registro que o testador copia — no navegador os mesmos numeros
+    /// aparecem numa caixa na tela.
+    pub fn contagem_biblioteca(&mut self) -> (usize, usize, usize, usize) {
+        self.mutate_with_update_context(|context| {
+            context.library.limpar_mortas();
+            let (swfs, figuras, _, _, _) = context.library.contagem();
+            let (carregamentos, _, _) = context.load_manager.contagem();
+            let segurando = context.load_manager.segurando();
+            (swfs, figuras, carregamentos, segurando)
+        })
+    }
+
     pub fn set_quality(&mut self, quality: StageQuality) {
         self.mutate_with_update_context(|context| {
             context.stage.set_quality(context, quality);
