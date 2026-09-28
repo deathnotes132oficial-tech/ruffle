@@ -103,7 +103,7 @@ mod fila_de_carregamento {
 
     /// A vaga em si. Devolvida sozinha quando sai de escopo, inclusive se o
     /// carregamento morrer no meio ou for cancelado.
-    pub struct Vaga(());
+    pub struct Vaga;
 
     impl Drop for Vaga {
         fn drop(&mut self) {
@@ -135,7 +135,7 @@ mod fila_de_carregamento {
                     f.esperando.retain(|(outro, _)| *outro != n);
                 }
                 f.em_voo += 1;
-                return Poll::Ready(Vaga(()));
+                return Poll::Ready(Vaga);
             }
 
             // Entra na fila, ou so atualiza o proprio despertador.
