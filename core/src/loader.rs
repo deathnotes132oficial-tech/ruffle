@@ -53,6 +53,126 @@ use swf::read::{extract_swz, read_compression_type};
 use thiserror::Error;
 use url::{ParseError, Url, form_urlencoded};
 
+/// UMA FILA DE CARREGAMENTOS, EM VEZ DE TODOS DE UMA VEZ.
+///
+/// O que se mediu no DDTank rodando no iPhone: ao abrir a mochila, o jogo pede
+/// centenas de arquivos no mesmo quadro, e o Ruffle abre TODOS na hora. Numa
+/// das medidas foram 426 simultaneos, e os 426 SWFs existiram ao mesmo tempo
+/// por uma fracao de segundo. Custo do pico: 742 MB de uma vez, devolvidos no
+/// segundo seguinte. Com o jogo ja parado em ~4 GB e o teto do aparelho em
+/// 6,1 GB, e o pico que estoura, nao o crescimento.
+///
+/// O Flash de verdade nunca fez isso: ele limitava as conexoes simultaneas e o
+/// resto esperava a vez. Aqui o limite volta a existir.
+///
+/// Nao muda evento nenhum. Quem espera na fila ainda nao comecou: o "open" so
+/// e disparado depois de pegar a vaga, que e exatamente quando a requisicao
+/// sai de verdade.
+mod fila_de_carregamento {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Mutex, OnceLock};
+    use std::task::{Context, Poll, Waker};
+
+    /// Quantos carregamentos podem estar no ar ao mesmo tempo.
+    ///
+    /// Oito e generoso de proposito. O pico medido era 426; cortar pra 8 ja
+    /// tira o problema inteiro, e sobra folga caso alguma conexao trave
+    /// segurando a vaga dela.
+    const TETO: usize = 8;
+
+    struct Fila {
+        em_voo: usize,
+        /// Quem espera, em ordem de chegada. O numero e so pra identificar a
+        /// espera se ela for descartada antes de ser atendida.
+        esperando: VecDeque<(u64, Waker)>,
+        proximo_numero: u64,
+    }
+
+    fn fila() -> &'static Mutex<Fila> {
+        static F: OnceLock<Mutex<Fila>> = OnceLock::new();
+        F.get_or_init(|| {
+            Mutex::new(Fila {
+                em_voo: 0,
+                esperando: VecDeque::new(),
+                proximo_numero: 0,
+            })
+        })
+    }
+
+    /// A vaga em si. Devolvida sozinha quando sai de escopo, inclusive se o
+    /// carregamento morrer no meio ou for cancelado.
+    pub struct Vaga(());
+
+    impl Drop for Vaga {
+        fn drop(&mut self) {
+            let proximo = {
+                let mut f = fila().lock().unwrap();
+                f.em_voo -= 1;
+                f.esperando.pop_front()
+            };
+            if let Some((_, acordar)) = proximo {
+                acordar.wake();
+            }
+        }
+    }
+
+    /// A espera pela vaga.
+    pub struct Espera {
+        numero: Option<u64>,
+    }
+
+    impl Future for Espera {
+        type Output = Vaga;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Vaga> {
+            let mut f = fila().lock().unwrap();
+
+            if f.em_voo < TETO {
+                // Pegou a vaga. Sai da fila se estava nela.
+                if let Some(n) = self.numero.take() {
+                    f.esperando.retain(|(outro, _)| *outro != n);
+                }
+                f.em_voo += 1;
+                return Poll::Ready(Vaga(()));
+            }
+
+            // Entra na fila, ou so atualiza o proprio despertador.
+            match self.numero {
+                Some(n) => {
+                    if let Some((_, w)) = f.esperando.iter_mut().find(|(outro, _)| *outro == n) {
+                        w.clone_from(cx.waker());
+                    }
+                }
+                None => {
+                    let n = f.proximo_numero;
+                    f.proximo_numero += 1;
+                    self.numero = Some(n);
+                    f.esperando.push_back((n, cx.waker().clone()));
+                }
+            }
+            Poll::Pending
+        }
+    }
+
+    impl Drop for Espera {
+        fn drop(&mut self) {
+            // Desistiu antes de ser atendida: tira o despertador da fila, senao
+            // a vez dela seria dada a ninguem e a fila travava ali.
+            if let Some(n) = self.numero {
+                let mut f = fila().lock().unwrap();
+                f.esperando.retain(|(outro, _)| *outro != n);
+            }
+        }
+    }
+
+    /// Espera a vez. Enquanto houver vaga, devolve na hora.
+    pub fn vaga() -> Espera {
+        Espera { numero: None }
+    }
+}
+
 new_key_type! {
     pub struct LoaderHandle;
 }
@@ -791,6 +911,15 @@ impl<'gc> MovieLoader<'gc> {
         let handle = self.self_handle.expect("Loader not self-introduced");
 
         Box::pin(async move {
+            // ESPERA A VEZ ANTES DE COMECAR.
+            //
+            // Tudo daqui pra baixo — a requisicao, o corpo da resposta na
+            // memoria, o SWF montado a partir dele — e o que custa. Segurando
+            // oito por vez em vez de centenas, o pico some e o custo vira uma
+            // onda baixa e continua. A vaga volta sozinha quando este bloco
+            // termina, de qualquer jeito que ele termine.
+            let _vaga = fila_de_carregamento::vaga().await;
+
             let request_url = request.url().to_string();
             let resolved_url = player.lock().unwrap().navigator().resolve_url(&request_url);
 
