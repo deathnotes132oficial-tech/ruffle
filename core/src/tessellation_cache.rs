@@ -32,6 +32,12 @@ impl TessellationCache {
         }
     }
 
+    /// Esvazia o cache, soltando as malhas extras que ele guardava.
+    pub(crate) fn limpar(&mut self) {
+        self.entries = std::array::from_fn(|_| None);
+        self.len = 0;
+    }
+
     /// Finds the cached shape handle with the closest scale to the target scale.
     ///
     /// If the closest scale is NOT within the retessellation threshold,
