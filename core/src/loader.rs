@@ -252,10 +252,20 @@ impl<'gc> LoadManager<'gc> {
         let mut total = 0;
         let mut sem_clipe = 0;
         let mut pendentes = 0;
+        // Das tres exigencias de try_fire_loaderinfo_events, qual falha.
+        let mut sem_iniciar = 0;
+        let mut sem_info = 0;
         for (_, loader) in self.0.iter() {
             total += 1;
-            if loader.target_clip.as_movie_clip().is_none() {
-                sem_clipe += 1;
+            match loader.target_clip.as_movie_clip() {
+                None => sem_clipe += 1,
+                Some(clipe) => {
+                    if !clipe.initialized() || clipe.avm2_constructor_failed() {
+                        sem_iniciar += 1;
+                    } else if clipe.loader_info().is_none() {
+                        sem_info += 1;
+                    }
+                }
             }
             if matches!(
                 loader.loader_status,
@@ -264,6 +274,9 @@ impl<'gc> LoadManager<'gc> {
                 pendentes += 1;
             }
         }
+        tracing::warn!(
+            "CARREGAMENTOS: {total} presos | sem clipe {sem_clipe} | sem iniciar {sem_iniciar} | sem info {sem_info}"
+        );
         (total, sem_clipe, pendentes)
     }
 
