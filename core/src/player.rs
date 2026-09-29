@@ -1048,6 +1048,46 @@ impl Player {
 
     /// Os contadores da investigacao de memoria, pra quem esta de fora.
     ///
+    /// FORCA UMA COLETA COMPLETA. Chamada quando a memoria esta acabando.
+    ///
+    /// O coletor do Ruffle trabalha por "divida": ele soma o tamanho do que foi
+    /// alocado e, quando passa de um limite, trabalha um pouco. O problema e o
+    /// que ele soma. Um objeto do ActionScript que segura um punhado de bytes
+    /// — os bytes de um SWF, o conteudo de um ByteArray, os pontos de uma
+    /// imagem — conta como o tamanhinho do objeto, nao como a carga pendurada
+    /// nele. Entao um SWF morto de 20 MB parece dever quase nada, o coletor
+    /// continua dormindo, e o processo cresce sem que ninguem perceba.
+    ///
+    /// Medido no iPhone: o aplicativo em 6088 MB, com 232 MB no Metal e uns
+    /// 330 MB no total do que o Ruffle sabe que tem. O resto e isto aqui.
+    ///
+    /// Uma vez por segundo, no maximo. Uma coleta completa custa um quadro, e
+    /// oito por segundo custariam o jogo inteiro. Quem chama e o aplicativo,
+    /// que e quem enxerga a memoria do aparelho.
+    ///
+    /// Devolve quantos objetos sairam, pra dar pra ver no registro se adiantou.
+    pub fn coletar_tudo(&mut self) -> usize {
+        thread_local! {
+            static ULTIMA_COLETA: std::cell::Cell<Option<Instant>> =
+                const { std::cell::Cell::new(None) };
+        }
+
+        let agora = Instant::now();
+        let pode = ULTIMA_COLETA.with(|u| match u.get() {
+            Some(antes) => agora.duration_since(antes).as_millis() >= 1000,
+            None => true,
+        });
+        if !pode {
+            return 0;
+        }
+        ULTIMA_COLETA.with(|u| u.set(Some(agora)));
+
+        let antes = self.gc_arena.borrow().metrics().total_gc_count();
+        self.gc_arena.borrow_mut().finish_cycle();
+        let depois = self.gc_arena.borrow().metrics().total_gc_count();
+        antes.saturating_sub(depois)
+    }
+
     /// Devolve a linha JA PRONTA, em vez de um punhado de numeros.
     ///
     /// Assim acrescentar uma medida mexe neste arquivo e mais nenhum: o
@@ -1058,7 +1098,18 @@ impl Player {
     /// Tambem e aqui que a vassoura passa, porque este e o unico ponto que
     /// roda de tempos em tempos com a biblioteca em maos.
     pub fn contagem_biblioteca(&mut self) -> String {
-        self.mutate_with_update_context(|context| {
+        // O monte do ActionScript: quantos objetos vivos, e quanta divida o
+        // coletor acha que tem. Lido fora do bloco abaixo porque aquele ja
+        // esta com a arena em maos.
+        let (objetos, divida) = {
+            let arena = self.gc_arena.borrow();
+            (
+                arena.metrics().total_gc_count(),
+                arena.metrics().allocation_debt() as u64,
+            )
+        };
+
+        let linha = self.mutate_with_update_context(|context| {
             context.library.limpar_mortas();
             context.library.soltar_texturas_paradas(PRAZO_DA_TEXTURA);
             let malhas_soltas = context.library.soltar_malhas_paradas(PRAZO_DA_TEXTURA);
@@ -1089,7 +1140,9 @@ impl Player {
                 d.clipes,
                 d.outros,
             )
-        })
+        });
+
+        format!("{linha} | gc {objetos} divida {divida}")
     }
 
     pub fn set_quality(&mut self, quality: StageQuality) {
