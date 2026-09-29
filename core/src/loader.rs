@@ -1939,6 +1939,27 @@ impl<'gc> MovieLoader<'gc> {
                     movie.set_force_avm1();
                 }
 
+                // AVISA O COLETOR QUANTO ISTO PESA DE VERDADE.
+                //
+                // O coletor conta divida em NUMERO DE OBJETOS, nunca em bytes:
+                // mark_gc_allocated soma 1 por objeto criado, e a hora de
+                // acordar e comparada com o total de objetos vivos. Um SWF de
+                // 20 MB conta como UM. Com centenas de milhares de objetos
+                // vivos, milhares de SWFs mortos nao chegam nem perto de
+                // acordar ninguem — e o processo cresce em gigabytes enquanto o
+                // coletor acha que nao ha nada a fazer.
+                //
+                // Foi exatamente isso que o iPhone mostrou: 6088 MB no
+                // aplicativo, 232 MB no Metal, e uns 330 MB no total do que o
+                // Ruffle sabia que possuia. O resto eram mortos que ninguem
+                // recolhia.
+                //
+                // Uma unidade de divida por KB poe o peso na conta. O SWF de
+                // 20 MB passa a valer 20 mil, que e da ordem de grandeza certa
+                // pra acordar o coletor — e quem nao pesa nada continua sem
+                // atrapalhar, porque um arquivo de 2 KB soma 2.
+                uc.gc().metrics().adjust_debt(data.len() as f64 / 1024.0);
+
                 Arc::new(movie)
             }
             ContentType::Gif | ContentType::Jpeg | ContentType::JpegXr | ContentType::Png => {
