@@ -578,6 +578,27 @@ impl Player {
         if medir {
             ULTIMA_CONTAGEM.with(|u| u.set(Some(agora)));
 
+            // O COLETOR PRECISA DORMIR MENOS.
+            //
+            // Por padrao ele so acorda quando a divida chega a metade do numero
+            // de objetos vivos. A conta da divida usa o TAMANHO DO OBJETO, e nao
+            // a carga pendurada nele — entao mil SWFs mortos de 20 MB parecem
+            // dever quase nada, e ele continua dormindo enquanto o processo
+            // cresce. Foi assim que o aplicativo chegou a 6 GB tendo, de tudo o
+            // que o Ruffle sabe que possui, uns 330 MB.
+            //
+            // Baixar o fator pra 0,05 faz ele acordar dez vezes mais cedo. O
+            // trabalho por vez continua o mesmo — os outros fatores nao mudam —
+            // entao nao ha pausa longa: ele so passa a trabalhar com mais
+            // frequencia, que e exatamente o que faltava.
+            self.gc_arena
+                .borrow()
+                .metrics()
+                .set_pacing(gc_arena::metrics::Pacing {
+                    sleep_factor: 0.05,
+                    ..gc_arena::metrics::Pacing::DEFAULT
+                });
+
             // Acerta o relogio das texturas e passa a vassoura.
             let inicio = INICIO.with(|i| {
                 if i.get().is_none() {
