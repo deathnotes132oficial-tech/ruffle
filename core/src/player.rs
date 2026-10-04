@@ -1118,6 +1118,34 @@ impl Player {
     ///
     /// Tambem e aqui que a vassoura passa, porque este e o unico ponto que
     /// roda de tempos em tempos com a biblioteca em maos.
+    /// SOLTA TUDO O QUE DER, AGORA.
+    ///
+    /// A varredura de sempre so solta o que esta parado ha vinte segundos, o
+    /// que e certo no uso normal: soltar cedo demais faz a proxima tela pagar
+    /// pra reconstruir tudo.
+    ///
+    /// Esta aqui e para o instante em que o iOS avisa que vai faltar memoria.
+    /// Nesse momento nao ha vinte segundos: ou se devolve agora, ou o sistema
+    /// escolhe o aplicativo pra encerrar. Entao o prazo e zero.
+    ///
+    /// Devolve o relato pronto, pra quem chama so anotar.
+    pub fn devolver_memoria(&mut self) -> String {
+        let (texturas, bytes, malhas) = self.mutate_with_update_context(|context| {
+            let (texturas, bytes) = context.library.soltar_texturas_paradas(0);
+            let malhas = context.library.soltar_malhas_paradas(0);
+            (texturas, bytes, malhas)
+        });
+
+        // A coleta vem DEPOIS de soltar: as texturas e malhas que acabaram de
+        // ser largadas so viram memoria livre quando o coletor passa por elas.
+        let objetos = self.coletar_tudo();
+
+        format!(
+            "jogo soltou {texturas} textura(s) ({} MB) e {malhas} malha(s), coletou {objetos} objeto(s)",
+            bytes / (1024 * 1024)
+        )
+    }
+
     pub fn contagem_biblioteca(&mut self) -> String {
         // O monte do ActionScript: quantos objetos vivos, e quanta divida o
         // coletor acha que tem. Lido fora do bloco abaixo porque aquele ja
