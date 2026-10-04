@@ -1,6 +1,7 @@
 //! `flash.display.BitmapData` builtin/prototype
 
 use crate::avm2::Error;
+use std::sync::Arc;
 use crate::avm2::activation::Activation;
 use crate::avm2::bytearray::ByteArrayStorage;
 use crate::avm2::error::{
@@ -72,10 +73,10 @@ fn get_rectangle_x_y_width_height<'gc>(
 /// class named by `name`.
 pub fn fill_bitmap_data_from_symbol<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    bd: &CompressedBitmap,
+    bd: Arc<CompressedBitmap>,
 ) -> BitmapData<'gc> {
     let bitmap = bd.decode().expect("Failed to decode BitmapData");
-    BitmapData::new_with_pixels(
+    let dados = BitmapData::new_with_pixels(
         activation.context.gc_context,
         bitmap.width(),
         bitmap.height(),
@@ -84,7 +85,17 @@ pub fn fill_bitmap_data_from_symbol<'gc>(
             .as_colors()
             .map(crate::bitmap::bitmap_data::Color::from)
             .collect(),
-    )
+    );
+
+    // O ORIGINAL VAI JUNTO, E E AQUI QUE IMPORTA.
+    //
+    // Este e o caminho do AS3 — o que o DDTank usa de verdade. A tentativa
+    // anterior marcou a origem em outro lugar (na instanciacao do display
+    // object), e aquela copia e DESCARTADA logo em seguida: o construtor do
+    // AS3 monta outra, aqui, e e essa que fica. Por isso a economia media
+    // zero em todas as linhas do registro.
+    dados.definir_origem(activation.context.gc_context, bd);
+    dados
 }
 
 /// Implements `flash.display.BitmapData`'s 'init' method (invoked from the AS3 constructor)
@@ -114,7 +125,7 @@ pub fn init<'gc>(
 
     let new_bitmap_data = if let Some(Character::Bitmap(bitmap)) = character {
         // Instantiating BitmapData from an Animate-style bitmap asset
-        fill_bitmap_data_from_symbol(activation, bitmap.compressed())
+        fill_bitmap_data_from_symbol(activation, bitmap.comprimido_compartilhado())
     } else {
         if character.is_some() {
             //TODO: Determine if mismatched symbols will still work as a

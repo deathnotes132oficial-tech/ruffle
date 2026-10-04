@@ -68,10 +68,18 @@ use url::{ParseError, Url, form_urlencoded};
 /// Nao muda evento nenhum. Quem espera na fila ainda nao comecou: o "open" so
 /// e disparado depois de pegar a vaga, que e exatamente quando a requisicao
 /// sai de verdade.
+/// Diz ao carregador que a memoria apertou, ou que passou.
+///
+/// Quem sabe disso e o aparelho, nao o carregador — por isso vem de fora.
+pub fn definir_aperto(apertado: bool) {
+    fila_de_carregamento::definir_aperto(apertado);
+}
+
 mod fila_de_carregamento {
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::task::{Context, Poll, Waker};
 
@@ -81,6 +89,32 @@ mod fila_de_carregamento {
     /// tira o problema inteiro, e sobra folga caso alguma conexao trave
     /// segurando a vaga dela.
     const TETO: usize = 8;
+
+    /// O teto enquanto a memoria aperta.
+    ///
+    /// A rajada de carregamento e o que mata o aplicativo: medido, o uso saltou
+    /// de 986 MB para 1213 MB em dois segundos enquanto oito modulos eram
+    /// descomprimidos ao mesmo tempo. Em regime ele caberia; no pico, nao.
+    ///
+    /// Dois em vez de oito nao faz o jogo carregar menos coisa — faz carregar
+    /// em mais etapas, e cada etapa cabe. Demora um pouco mais e nao morre.
+    const TETO_APERTADO: usize = 2;
+
+    static APERTO: AtomicBool = AtomicBool::new(false);
+
+    /// Liga e desliga o aperto. Quem sabe que a memoria acabou e o aparelho,
+    /// nao o carregador — entao isto vem de fora.
+    pub fn definir_aperto(apertado: bool) {
+        APERTO.store(apertado, Ordering::Relaxed);
+    }
+
+    fn teto() -> usize {
+        if APERTO.load(Ordering::Relaxed) {
+            TETO_APERTADO
+        } else {
+            TETO
+        }
+    }
 
     struct Fila {
         em_voo: usize,
@@ -129,7 +163,7 @@ mod fila_de_carregamento {
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Vaga> {
             let mut f = fila().lock().unwrap();
 
-            if f.em_voo < TETO {
+            if f.em_voo < teto() {
                 // Pegou a vaga. Sai da fila se estava nela.
                 if let Some(n) = self.numero.take() {
                     f.esperando.retain(|(outro, _)| *outro != n);
@@ -143,6 +177,15 @@ mod fila_de_carregamento {
                 Some(n) => {
                     if let Some((_, w)) = f.esperando.iter_mut().find(|(outro, _)| *outro == n) {
                         w.clone_from(cx.waker());
+                    } else {
+                        // JA SAIU DA FILA MAS NAO COUBE: VOLTA PRO FIM.
+                        //
+                        // Quem devolve uma vaga acorda o primeiro da fila e o
+                        // tira dela. Se o teto tiver baixado nesse meio tempo,
+                        // o acordado nao cabe — e sem esta linha ele ficaria
+                        // esperando um despertador que ninguem mais tem, e o
+                        // carregamento travava ali pra sempre.
+                        f.esperando.push_back((n, cx.waker().clone()));
                     }
                 }
                 None => {

@@ -316,6 +316,20 @@ enum RunState {
 /// tela que o jogador realmente deixou pra tras.
 const PRAZO_DA_TEXTURA: u64 = 20;
 
+/// O prazo usado quando o iOS avisa que vai faltar memoria.
+///
+/// Menor que o de sempre, porque o momento e outro — mas nao zero. Soltar
+/// tudo faz o jogo refazer tudo em seguida, e isso custa mais memoria e mais
+/// tempo do que economiza.
+const PRAZO_NO_APERTO: u64 = 5;
+
+thread_local! {
+    /// Quando o ultimo aperto foi declarado. A fila volta ao normal sozinha
+    /// depois que a poeira baixa — senao o jogo carregaria devagar pra sempre
+    /// por causa de um susto de vinte segundos atras.
+    static APERTO_DESDE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
 pub struct Player {
     /// The version of the player we're emulating.
     ///
@@ -1130,9 +1144,46 @@ impl Player {
     ///
     /// Devolve o relato pronto, pra quem chama so anotar.
     pub fn devolver_memoria(&mut self) -> String {
+        // A RODA DE HAMSTER, E POR QUE ELA ACABOU.
+        //
+        // A primeira versao disto soltava TUDO (prazo zero) a cada aviso do
+        // iOS. O resultado, medido: as texturas iam a zero, o jogo as refazia
+        // na hora seguinte, a memoria da placa de video saltava de 37 pra 120
+        // MB, o iOS avisava de novo — e cada volta custava um a dois segundos
+        // de aplicativo parado. O testador sentiu isso como "mal consegui
+        // abrir".
+        //
+        // Agora:
+        //   - vale um alivio a cada cinco segundos, e nao um por aviso;
+        //   - solta so o que esta parado ha cinco segundos, e nao tudo;
+        //   - e segura a fila de carregamento, que e de onde vem o pico.
+        thread_local! {
+            static ULTIMO_ALIVIO: std::cell::Cell<Option<Instant>> =
+                const { std::cell::Cell::new(None) };
+        }
+
+        let agora = Instant::now();
+        let pode = ULTIMO_ALIVIO.with(|u| match u.get() {
+            Some(antes) => agora.duration_since(antes).as_millis() >= 5000,
+            None => true,
+        });
+
+        // O APERTO VALE SEMPRE, mesmo quando o resto nao roda.
+        //
+        // Ele nao custa nada e e o que corta a rajada: oito modulos sendo
+        // descomprimidos ao mesmo tempo foi o que levou o uso de 986 MB a
+        // 1213 MB em dois segundos.
+        crate::loader::definir_aperto(true);
+        APERTO_DESDE.with(|a| a.set(Some(agora)));
+
+        if !pode {
+            return "alivio recente, so segurei a fila".to_string();
+        }
+        ULTIMO_ALIVIO.with(|u| u.set(Some(agora)));
+
         let (texturas, bytes, malhas) = self.mutate_with_update_context(|context| {
-            let (texturas, bytes) = context.library.soltar_texturas_paradas(0);
-            let malhas = context.library.soltar_malhas_paradas(0);
+            let (texturas, bytes) = context.library.soltar_texturas_paradas(PRAZO_NO_APERTO);
+            let malhas = context.library.soltar_malhas_paradas(PRAZO_NO_APERTO);
             (texturas, bytes, malhas)
         });
 
@@ -1157,6 +1208,20 @@ impl Player {
                 arena.metrics().allocation_debt() as u64,
             )
         };
+
+        // O APERTO NAO E PRA SEMPRE.
+        //
+        // Passados vinte segundos sem aviso novo, a fila volta aos oito. Sem
+        // isto, um unico susto deixaria o jogo carregando de dois em dois pelo
+        // resto da sessao.
+        APERTO_DESDE.with(|a| {
+            if let Some(quando) = a.get() {
+                if Instant::now().duration_since(quando).as_secs() >= 20 {
+                    crate::loader::definir_aperto(false);
+                    a.set(None);
+                }
+            }
+        });
 
         let linha = self.mutate_with_update_context(|context| {
             context.library.limpar_mortas();

@@ -991,18 +991,24 @@ impl<'gc> BitmapRawData<'gc> {
     ///
     ///   - existe o original pra refazer a partir dele;
     ///   - a textura ja existe, entao desenhar nao depende mais destes pixels;
-    ///   - nada foi escrito aqui (estado limpo) e o ActionScript nao tem esta
-    ///     imagem em maos, entao ninguem pode estar lendo pixel.
+    ///   - nada foi escrito aqui, entao o original ainda descreve a imagem.
     ///
-    /// Faltando qualquer uma, nao se larga nada. E essa a garantia de que isto
-    /// nao pode mudar o que aparece na tela.
+    /// Faltando qualquer uma, nao se larga nada.
+    ///
+    /// NAO se exige mais que o ActionScript esteja fora. Essa condicao estava
+    /// aqui por medo e tornava a economia inutil: o DDTank e AS3, e no AS3
+    /// TODA imagem da biblioteca ganha um objeto do ActionScript ao nascer.
+    /// Com ela, a economia nunca disparou uma unica vez — medido, zero.
+    ///
+    /// O que protege nao e essa condicao: sao os portoes. Qualquer caminho
+    /// que alcance os pixels (`sync`, `read_area`, `overwrite_cpu_pixels_from_gpu`)
+    /// refaz a copia antes de entregar. Quem so desenha nunca passa por eles.
     fn largar_pixels(&mut self) {
         if self.pixels_soltos || self.disposed || self.pixels.is_empty() {
             return;
         }
         if self.origem.is_none()
             || self.bitmap_handle.is_none()
-            || self.avm2_object.is_some()
             || !matches!(self.dirty_state, DirtyState::Clean)
         {
             return;
