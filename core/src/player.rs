@@ -1191,7 +1191,20 @@ impl Player {
             )
         });
 
-        format!("{linha} | gc {objetos} divida {divida}")
+        // O QUE A ECONOMIA DE PIXELS RENDEU.
+        //
+        // "largados" e o total desde que o aplicativo abriu; "agora" e quanto
+        // esta largado neste instante — a economia de verdade. "refeitos" diz
+        // quantas vezes alguem precisou dos pixels de volta: se esse numero
+        // subir muito, a economia esta custando tempo e vale repensar.
+        let (largados, agora, refeitos) = crate::bitmap::bitmap_data::contagem_de_pixels();
+        let mb = |bytes: usize| bytes / (1024 * 1024);
+
+        format!(
+            "{linha} | gc {objetos} divida {divida} | pixels largados {} MB agora {} MB refeitos {refeitos}",
+            mb(largados),
+            mb(agora),
+        )
     }
 
     pub fn set_quality(&mut self, quality: StageQuality) {

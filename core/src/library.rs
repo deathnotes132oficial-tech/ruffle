@@ -273,8 +273,22 @@ impl<'gc> MovieLibrary<'gc> {
                 // subida nao falha. Falhando, nao havia de onde instanciar.
                 let swf = self.swf.upgrade()?;
                 let avm2_class = bitmap.avm2_class();
-                let bitmap = bitmap.compressed().decode().unwrap();
-                let bitmap = Bitmap::new(mc, id, bitmap, swf);
+
+                // O ORIGINAL VAI JUNTO COM A COPIA.
+                //
+                // Esta linha abaixo descomprime a imagem INTEIRA, e fazia isso
+                // a cada vez que o jogo punha a mesma figura em cena — cinquenta
+                // aparicoes do mesmo icone eram cinquenta copias de pixel vivas
+                // pra sempre, lado a lado com a textura. Era o maior pedaco de
+                // memoria do aplicativo, e nenhum contador o enxergava.
+                //
+                // Guardando o original junto (que e pequeno e compartilhado
+                // entre todas as copias), a copia grande pode ser largada assim
+                // que virar textura, e refeita se alguem for ler pixel dela.
+                let origem = bitmap.comprimido_compartilhado();
+                let decodificada = bitmap.compressed().decode().unwrap();
+                let bitmap = Bitmap::new(mc, id, decodificada, swf);
+                bitmap.bitmap_data().definir_origem(mc, origem);
                 bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                 Some(bitmap.instantiate(mc).into())
             }

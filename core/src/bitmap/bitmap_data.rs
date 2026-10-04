@@ -1,4 +1,5 @@
 use crate::avm2::object::BitmapDataObject;
+use crate::character::CompressedBitmap;
 use crate::context::RenderContext;
 use crate::display_object::{BoundsMode, DisplayObject, DisplayObjectWeak, TDisplayObject};
 use bitflags::bitflags;
@@ -10,10 +11,29 @@ use ruffle_render::bitmap::{
 };
 use ruffle_wstr::WStr;
 use std::cell::Ref;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::fmt::Debug;
 use std::ops::Range;
 use swf::{Rectangle, Twips};
 use tracing::instrument;
+
+// QUANTO ESTA ECONOMIA RENDEU, EM BYTES.
+//
+// Numeros soltos de proposito: quem larga um pixel esta no meio do desenho e
+// nao tem como alcancar o contador da biblioteca.
+static PIXELS_LARGADOS_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PIXELS_LARGADOS_AGORA: AtomicUsize = AtomicUsize::new(0);
+static PIXELS_REFEITOS: AtomicUsize = AtomicUsize::new(0);
+
+/// (bytes largados no total, bytes largados neste instante, vezes refeitos)
+pub fn contagem_de_pixels() -> (usize, usize, usize) {
+    (
+        PIXELS_LARGADOS_BYTES.load(Ordering::Relaxed),
+        PIXELS_LARGADOS_AGORA.load(Ordering::Relaxed),
+        PIXELS_REFEITOS.load(Ordering::Relaxed),
+    )
+}
 
 /// An implementation of the Lehmer/Park-Miller random number generator
 /// Uses the fixed parameters m = 2,147,483,647 and a = 16,807
@@ -293,6 +313,11 @@ impl<'gc> BitmapData<'gc> {
         self.0.read_area(read_area, renderer)
     }
 
+    /// De onde esta imagem veio, pra poder ser largada e refeita.
+    pub fn definir_origem(&self, mc: &Mutation<'gc>, origem: Arc<CompressedBitmap>) {
+        self.0.definir_origem(mc, origem)
+    }
+
     pub fn height(&self) -> u32 {
         self.0.height()
     }
@@ -386,6 +411,22 @@ pub struct BitmapRawData<'gc> {
     #[collect(require_static)]
     bitmap_handle: Option<BitmapHandle>,
 
+    /// O ORIGINAL COMPRIMIDO desta imagem, quando ela nasceu de uma figura
+    /// do SWF.
+    ///
+    /// Existe por um motivo so: permitir jogar os pixels fora. Cada vez que o
+    /// jogo poe uma imagem em cena, a copia descomprimida inteira e criada e
+    /// fica viva pra sempre, ao lado da textura — o mesmo icone posto cinquenta
+    /// vezes virava cinquenta copias. Guardando o original, que e pequeno e
+    /// compartilhado entre as copias, a copia grande pode morrer assim que a
+    /// textura existir, e renascer se alguem for ler pixel.
+    #[collect(require_static)]
+    origem: Option<Arc<CompressedBitmap>>,
+
+    /// Os pixels foram largados e precisam ser refeitos antes do proximo uso.
+    #[collect(require_static)]
+    pixels_soltos: bool,
+
     /// The AVM2 side of this `BitmapData`.
     ///
     /// AVM1 cannot retrieve `BitmapData` back from the display object tree, so
@@ -428,6 +469,9 @@ mod wrapper {
     use ruffle_render::bitmap::{BitmapHandle, PixelRegion, PixelSnapping};
     use ruffle_render::commands::CommandHandler;
     use std::cell::Ref;
+
+    use crate::character::CompressedBitmap;
+    use std::sync::Arc;
 
     use super::{BitmapRawData, DirtyState, copy_pixels_to_bitmapdata};
 
@@ -482,6 +526,8 @@ mod wrapper {
                     transparency: false,
                     disposed: true,
                     bitmap_handle: None,
+                    origem: None,
+                    pixels_soltos: false,
                     avm2_object: None,
                     display_objects: vec![],
                     dirty_state: DirtyState::Clean,
@@ -505,6 +551,8 @@ mod wrapper {
                 transparency: data.transparency,
                 disposed: data.disposed,
                 bitmap_handle: None,
+                origem: None,
+                pixels_soltos: false,
                 avm2_object: None,
                 display_objects: vec![],
                 // We have no GPU texture, so there's no need to mark as dirty
@@ -524,6 +572,14 @@ mod wrapper {
             let mut write = unsafe { Write::assume(Gc::as_ref(self.0)) }
                 .unlock()
                 .borrow_mut();
+
+            // QUEM CHEGA AQUI VAI MEXER NOS PIXELS.
+            //
+            // `sync` e a porta por onde o resto do Ruffle alcanca a copia do
+            // lado da CPU. Se ela foi largada, volta agora — antes de qualquer
+            // um poder encontrar um vetor vazio.
+            write.refazer_pixels();
+
             match std::mem::replace(&mut write.dirty_state, DirtyState::Clean) {
                 DirtyState::GpuModified(sync_handle, bounds) => {
                     renderer
@@ -568,6 +624,12 @@ mod wrapper {
             mc: &Mutation<'gc>,
         ) -> (GcRefLock<'gc, BitmapRawData<'gc>>, Option<PixelRegion>) {
             let mut write = self.0.borrow_mut(mc);
+
+            // Quem chama aqui escreve pixel por indice calculado da largura.
+            // Com o vetor largado isso seria acesso fora da faixa — entao ele
+            // volta antes, mesmo que va ser inteiramente sobrescrito.
+            write.refazer_pixels();
+
             let dirty_rect = match write.dirty_state {
                 DirtyState::GpuModified(_, rect) => {
                     write.dirty_state = DirtyState::Clean;
@@ -594,7 +656,9 @@ mod wrapper {
             } else {
                 false
             };
-            if needs_update {
+            // O sync ja tem o acesso de escrita que refazer os pixels exige,
+            // entao se passa por ele em vez de repetir a manobra aqui.
+            if needs_update || self.0.borrow().pixels_soltos {
                 self.sync(renderer);
             }
             self.0.borrow()
@@ -603,6 +667,11 @@ mod wrapper {
         // These methods do not require a sync to complete, as they do not depend on the
         // CPU-side pixels. They are implemented directly on `BitmapRawDataWrapper`, allowing
         // callers to avoid calling sync()
+
+        /// De onde esta imagem veio, pra poder ser largada e refeita.
+        pub fn definir_origem(&self, mc: &Mutation<'gc>, origem: Arc<CompressedBitmap>) {
+            self.0.borrow_mut(mc).definir_origem(origem);
+        }
 
         pub fn height(&self) -> u32 {
             self.0.borrow().height
@@ -741,6 +810,8 @@ impl<'gc> BitmapRawData<'gc> {
             transparency,
             disposed: false,
             bitmap_handle: None,
+            origem: None,
+            pixels_soltos: false,
             avm2_object: None,
             display_objects: vec![],
             dirty_state: DirtyState::Clean,
@@ -761,6 +832,8 @@ impl<'gc> BitmapRawData<'gc> {
             height,
             transparency,
             bitmap_handle: None,
+            origem: None,
+            pixels_soltos: false,
             avm2_object: None,
             disposed: false,
             dirty_state: DirtyState::Clean,
@@ -802,6 +875,13 @@ impl<'gc> BitmapRawData<'gc> {
         if let Ok(ref handle) = bitmap_handle {
             self.dirty_state = DirtyState::Clean;
             self.bitmap_handle = Some(handle.clone());
+
+            // A COPIA DESCOMPRIMIDA ACABOU DE VIRAR REDUNDANTE.
+            //
+            // A partir daqui quem desenha e a textura. Guardar os pixels do
+            // lado da CPU so faz sentido pra quem for LER pixel, e `largar_pixels`
+            // confere isso antes de largar qualquer coisa.
+            self.largar_pixels();
         }
         bitmap_handle
     }
@@ -898,6 +978,75 @@ impl<'gc> BitmapRawData<'gc> {
     #[inline]
     pub fn get_pixel32_raw(&self, x: u32, y: u32) -> Color {
         self.pixels[(x + y * self.width()) as usize]
+    }
+
+    /// De onde esta imagem veio, pra poder ser refeita depois de largada.
+    pub fn definir_origem(&mut self, origem: Arc<CompressedBitmap>) {
+        self.origem = Some(origem);
+    }
+
+    /// LARGA A COPIA DESCOMPRIMIDA.
+    ///
+    /// So vale quando TRES coisas sao verdade ao mesmo tempo:
+    ///
+    ///   - existe o original pra refazer a partir dele;
+    ///   - a textura ja existe, entao desenhar nao depende mais destes pixels;
+    ///   - nada foi escrito aqui (estado limpo) e o ActionScript nao tem esta
+    ///     imagem em maos, entao ninguem pode estar lendo pixel.
+    ///
+    /// Faltando qualquer uma, nao se larga nada. E essa a garantia de que isto
+    /// nao pode mudar o que aparece na tela.
+    fn largar_pixels(&mut self) {
+        if self.pixels_soltos || self.disposed || self.pixels.is_empty() {
+            return;
+        }
+        if self.origem.is_none()
+            || self.bitmap_handle.is_none()
+            || self.avm2_object.is_some()
+            || !matches!(self.dirty_state, DirtyState::Clean)
+        {
+            return;
+        }
+
+        let bytes = self.pixels.len() * std::mem::size_of::<Color>();
+        self.pixels = Vec::new();
+        self.pixels_soltos = true;
+        PIXELS_LARGADOS_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        PIXELS_LARGADOS_AGORA.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// REFAZ A COPIA, descomprimindo o original de novo.
+    ///
+    /// Custa tempo, e e por isso que so se larga quem tem textura: no caminho
+    /// normal, desenhar nunca passa por aqui. Quem passa e o ActionScript
+    /// pedindo pixel — coisa que o jogo quase nunca faz.
+    pub fn refazer_pixels(&mut self) {
+        if !self.pixels_soltos {
+            return;
+        }
+        self.pixels_soltos = false;
+
+        let largura = self.width as usize;
+        let altura = self.height as usize;
+        let quantos = largura * altura;
+
+        let refeitos = self.origem.as_ref().and_then(|origem| origem.decode().ok());
+        self.pixels = match refeitos {
+            Some(imagem) => imagem.as_colors().map(Color::from).collect(),
+            // Nao conseguir refazer nao pode virar quebra: uma imagem preta e
+            // ruim, um aplicativo fechado e pior.
+            None => vec![Color::bgra_u32(0); quantos],
+        };
+
+        // Tamanho errado seria pior que imagem errada: os acessos sao por
+        // indice calculado da largura, e um vetor curto derruba tudo.
+        if self.pixels.len() != quantos {
+            self.pixels.resize(quantos, Color::bgra_u32(0));
+        }
+
+        let bytes = quantos * std::mem::size_of::<Color>();
+        PIXELS_LARGADOS_AGORA.fetch_sub(bytes.min(PIXELS_LARGADOS_AGORA.load(Ordering::Relaxed)), Ordering::Relaxed);
+        PIXELS_REFEITOS.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn raw_pixels_mut(&mut self) -> &mut Vec<Color> {

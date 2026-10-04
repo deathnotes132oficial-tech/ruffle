@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::audio::SoundHandle;
@@ -56,7 +57,14 @@ pub enum Character<'gc> {
 #[collect(no_drop)]
 pub struct BitmapCharacter<'gc> {
     #[collect(require_static)]
-    compressed: CompressedBitmap,
+    /// O ORIGINAL COMPRIMIDO, COMPARTILHADO.
+    ///
+    /// Passou a ser um Arc por um motivo de memoria: cada vez que o jogo poe
+    /// esta imagem em cena, a copia descomprimida dela e jogada fora assim que
+    /// vira textura — e refeita a partir DAQUI se alguem precisar ler pixel.
+    /// Pra isso, cada copia na tela precisa segurar o original, e segurar sem
+    /// duplicar e o que o Arc faz.
+    compressed: Arc<CompressedBitmap>,
     /// A lazily constructed GPU handle, used when performing fills with this bitmap
     ///
     /// DEIXOU DE SER PRA SEMPRE. Agora pode voltar a ser vazio: a varredura
@@ -75,12 +83,21 @@ pub struct BitmapCharacter<'gc> {
 
 impl<'gc> BitmapCharacter<'gc> {
     pub fn new(compressed: CompressedBitmap) -> Self {
+        Self::novo(Arc::new(compressed))
+    }
+
+    pub fn novo(compressed: Arc<CompressedBitmap>) -> Self {
         Self {
             compressed,
             handle: RefCell::new(None),
             usado_em: Cell::new(agora()),
             avm2_class: Lock::new(BitmapClass::NoSubclass),
         }
+    }
+
+    /// O original, pra quem precisa segura-lo junto (veja o campo).
+    pub fn comprimido_compartilhado(&self) -> Arc<CompressedBitmap> {
+        Arc::clone(&self.compressed)
     }
 
     pub fn compressed(&self) -> &CompressedBitmap {
