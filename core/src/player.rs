@@ -622,8 +622,7 @@ impl Player {
             });
             crate::character::marcar_o_tempo(agora.duration_since(inicio).as_secs());
 
-            let linha = self.contagem_biblioteca();
-            tracing::warn!("BIBLIOTECA: {linha}");
+            self.varredura();
         }
 
         self.frame_accumulator += dt;
@@ -1197,23 +1196,22 @@ impl Player {
         )
     }
 
-    pub fn contagem_biblioteca(&mut self) -> String {
-        // O monte do ActionScript: quantos objetos vivos, e quanta divida o
-        // coletor acha que tem. Lido fora do bloco abaixo porque aquele ja
-        // esta com a arena em maos.
-        let (objetos, divida) = {
-            let arena = self.gc_arena.borrow();
-            (
-                arena.metrics().total_gc_count(),
-                arena.metrics().allocation_debt() as u64,
-            )
-        };
-
+    /// A VARREDURA DE SEMPRE, SEM CONTAR NADA.
+    ///
+    /// Isto era `contagem_biblioteca`, e montava a linha inteira de numeros do
+    /// registro: percorria a biblioteca toda a cada duas segundos somando
+    /// texturas, malhas, bytes e tipos de figura. Serviu pra achar onde estava
+    /// a memoria; depois que a resposta veio, percorrer milhares de figuras
+    /// duas vezes por segundo passou a ser so custo.
+    ///
+    /// O que ficou e o que CONSERTA: limpar as mortas e soltar o que ninguem
+    /// desenha ha um tempo. Isso nunca foi medicao.
+    pub fn varredura(&mut self) {
         // O APERTO NAO E PRA SEMPRE.
         //
-        // Passados vinte segundos sem aviso novo, a fila volta aos oito. Sem
-        // isto, um unico susto deixaria o jogo carregando de dois em dois pelo
-        // resto da sessao.
+        // Passados vinte segundos sem aviso novo, a fila de carregamento volta
+        // aos oito. Sem isto, um unico susto deixaria o jogo carregando de dois
+        // em dois pelo resto da sessao.
         APERTO_DESDE.with(|a| {
             if let Some(quando) = a.get() {
                 if Instant::now().duration_since(quando).as_secs() >= 20 {
@@ -1223,53 +1221,11 @@ impl Player {
             }
         });
 
-        let linha = self.mutate_with_update_context(|context| {
+        self.mutate_with_update_context(|context| {
             context.library.limpar_mortas();
             context.library.soltar_texturas_paradas(PRAZO_DA_TEXTURA);
-            let malhas_soltas = context.library.soltar_malhas_paradas(PRAZO_DA_TEXTURA);
-
-            let d = context.library.detalhe();
-            let (carregamentos, _, _) = context.load_manager.contagem();
-            let segurando = context.load_manager.segurando();
-
-            let mb = |bytes: usize| bytes / (1024 * 1024);
-
-            format!(
-                "swfs {} figuras {} carreg {carregamentos} segurando {segurando} \
-                 | texturas {} ({} MB) malhas {} escalas {} soltas {malhas_soltas} \
-                 | swf {} MB imagens {} MB \
-                 | graficos {} bitmaps {} sons {} fontes {} clipes {} outros {}",
-                d.swfs,
-                d.figuras,
-                d.texturas,
-                mb(d.texturas_bytes),
-                d.malhas,
-                d.escalas,
-                mb(d.swf_bytes),
-                mb(d.imagem_bytes),
-                d.graficos,
-                d.bitmaps,
-                d.sons,
-                d.fontes,
-                d.clipes,
-                d.outros,
-            )
+            context.library.soltar_malhas_paradas(PRAZO_DA_TEXTURA);
         });
-
-        // O QUE A ECONOMIA DE PIXELS RENDEU.
-        //
-        // "largados" e o total desde que o aplicativo abriu; "agora" e quanto
-        // esta largado neste instante — a economia de verdade. "refeitos" diz
-        // quantas vezes alguem precisou dos pixels de volta: se esse numero
-        // subir muito, a economia esta custando tempo e vale repensar.
-        let (largados, agora, refeitos) = crate::bitmap::bitmap_data::contagem_de_pixels();
-        let mb = |bytes: usize| bytes / (1024 * 1024);
-
-        format!(
-            "{linha} | gc {objetos} divida {divida} | pixels largados {} MB agora {} MB refeitos {refeitos}",
-            mb(largados),
-            mb(agora),
-        )
     }
 
     pub fn set_quality(&mut self, quality: StageQuality) {
