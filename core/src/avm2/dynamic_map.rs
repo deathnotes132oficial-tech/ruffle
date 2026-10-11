@@ -42,6 +42,11 @@ pub struct DynamicMap<K, V> {
     // The actual bucket index that represents where an item is in the table
     #[collect(require_static)]
     real_index: Cell<usize>,
+    // How many keys were added or removed so far; the indices above are as of `cached_at` of them.
+    #[collect(require_static)]
+    mutations: u64,
+    #[collect(require_static)]
+    cached_at: Cell<u64>,
 }
 
 impl<K: Eq + Hash, V> Default for DynamicMap<K, V> {
@@ -61,6 +66,8 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
             hasher: FnvBuildHasher::default(),
             public_index: Cell::new(0),
             real_index: Cell::new(0),
+            mutations: 0,
+            cached_at: Cell::new(0),
         }
     }
 
@@ -133,6 +140,7 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
                         enumerable: true,
                     },
                 ));
+                self.mutations = self.mutations.wrapping_add(1);
             }
         }
     }
@@ -141,7 +149,11 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
         let hash = self.hash_key(key);
 
         match self.table.find_entry(hash, |(k, _)| k == key) {
-            Ok(occupied) => Some(occupied.remove().0.1),
+            Ok(occupied) => {
+                let removed = occupied.remove().0.1;
+                self.mutations = self.mutations.wrapping_add(1);
+                Some(removed)
+            }
             Err(_) => None,
         }
     }
@@ -154,6 +166,10 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
     // relied on long-term.
     // https://docs.rs/hashbrown/0.16.1/hashbrown/struct.HashTable.html#method.find_bucket_index
     pub fn next(&self, index: usize) -> Option<usize> {
+        // Whatever this leaves in the cache is as of now. A key added or removed during a for-in
+        // doesn't move where `next()` continues from (it carries on from the cached bucket, as
+        // avmplus does), but it does move the key at each index, which `pair_at` must not trust.
+        self.cached_at.set(self.mutations);
         // Start iteration from the beginning
         if index == 0 {
             if let Some(real) = self.public_to_real_index(1) {
@@ -202,7 +218,13 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
     }
 
     pub fn pair_at(&self, index: usize) -> Option<&(K, DynamicProperty<V>)> {
-        let real_index = if self.public_index.get() == 0 || self.public_index.get() != index {
+        // The cache holds the key at `public_index` only if no key was added or removed since
+        // `next()` set it. A reader by index without `next()`, as JSON.stringify is, would
+        // otherwise get the stale key at that one index: one key listed twice, and one lost.
+        let real_index = if self.public_index.get() == 0
+            || self.public_index.get() != index
+            || self.cached_at.get() != self.mutations
+        {
             self.public_to_real_index(index)?
         } else {
             self.real_index.get()
@@ -255,5 +277,63 @@ mod tests {
             println!("{}", map.key_at(current).unwrap());
             current = next;
         }
+    }
+
+    /// The keys JSON.stringify lists: it reads `key_at(i)` for i = 1, 2, ... without `next()`.
+    fn keys_by_position(map: &DynamicMap<&'static str, i32>) -> Vec<&'static str> {
+        (1..).map_while(|i| map.key_at(i).copied()).collect()
+    }
+
+    /// The keys a for-in or AMF lists: `next()`, then `key_at` of what it returned.
+    fn keys_by_next(map: &DynamicMap<&'static str, i32>) -> Vec<&'static str> {
+        let mut keys = vec![];
+        let mut index = map.next(0);
+        while let Some(i) = index {
+            keys.push(*map.key_at(i).unwrap());
+            index = map.next(i);
+        }
+        keys
+    }
+
+    #[test]
+    fn listing_by_position_after_a_finished_enumeration_and_an_insert_lists_every_key() {
+        // An AQW inventory item's keys. The game's copyObj enumerates it (AMF), then the game adds
+        // iQtyNow, then JSON.stringify lists it.
+        let keys: Vec<&'static str> = "sIcon bEquip EnhID sFile bUpg iCost iType tPurchase CharID sES \
+             sLink iDPS bStaff iHrs sElmt sName sType dPurchase iRng iLvl bCoins iQty iStk bBank sDesc \
+             iRty bTemp ItemID CharItemID"
+            .split_whitespace()
+            .collect();
+        for added in ["iQtyNow", "zz", "a", "bExtra2", "bHouse"] {
+            let mut map: DynamicMap<&'static str, i32> = DynamicMap::new();
+            for key in &keys {
+                map.insert(key, 0);
+            }
+
+            assert_eq!(keys_by_next(&map).len(), keys.len());
+            map.insert(added, 0);
+
+            let mut listed = keys_by_position(&map);
+            listed.sort();
+            let mut expected: Vec<&str> = keys.iter().copied().chain([added]).collect();
+            expected.sort();
+            assert_eq!(listed, expected, "after adding {added}");
+        }
+    }
+
+    #[test]
+    fn listing_by_position_after_a_finished_enumeration_and_a_remove_lists_every_key() {
+        let mut map: DynamicMap<&'static str, i32> = DynamicMap::new();
+        for key in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            map.insert(key, 0);
+        }
+        let listed = keys_by_next(&map);
+        map.remove(&listed[0]);
+
+        let mut after = keys_by_position(&map);
+        after.sort();
+        let mut expected = listed[1..].to_vec();
+        expected.sort();
+        assert_eq!(after, expected);
     }
 }
