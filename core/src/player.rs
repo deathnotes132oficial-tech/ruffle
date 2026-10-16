@@ -1250,6 +1250,53 @@ impl Player {
         });
 
         tracing::warn!("BIBLIOTECA: {linha}");
+
+        // A REPARTICAO INTEIRA, DE UMA VEZ.
+        //
+        // Ja medi uma categoria por build duas vezes e errei nas duas: as
+        // vtables deram ~1% e as texturas vivas deram 21 MB de 1700. Medir de
+        // novo uma caixinha por vez e so garantir um terceiro erro. Esta linha
+        // existia e foi removida em ceef3847; volta inteira, com o coletor e
+        // os pixels de BitmapData junto, que sao justamente o que nunca foi
+        // olhado.
+        let (objetos, divida) = {
+            let arena = self.gc_arena.borrow();
+            (
+                arena.metrics().total_gc_count(),
+                arena.metrics().allocation_debt() as u64,
+            )
+        };
+
+        let reparticao = self.mutate_with_update_context(|context| {
+            let d = context.library.detalhe();
+            let mb = |bytes: usize| bytes / (1024 * 1024);
+
+            format!(
+                "swf {} MB imagens {} MB | malhas {} escalas {} | graficos {} bitmaps {} sons {} fontes {} clipes {} outros {}",
+                mb(d.swf_bytes),
+                mb(d.imagem_bytes),
+                d.malhas,
+                d.escalas,
+                d.graficos,
+                d.bitmaps,
+                d.sons,
+                d.fontes,
+                d.clipes,
+                d.outros,
+            )
+        });
+
+        // "largados" e o total desde que a pagina abriu; "agora" e quanto esta
+        // largado neste instante — a economia de verdade. "refeitos" diz
+        // quantas vezes alguem precisou dos pixels de volta.
+        let (largados, agora, refeitos) = crate::bitmap::bitmap_data::contagem_de_pixels();
+        let mb = |bytes: usize| bytes / (1024 * 1024);
+
+        tracing::warn!(
+            "REPARTICAO: {reparticao} | gc {objetos} divida {divida} | pixels largados {} MB agora {} MB refeitos {refeitos}",
+            mb(largados),
+            mb(agora),
+        );
     }
 
     pub fn set_quality(&mut self, quality: StageQuality) {
