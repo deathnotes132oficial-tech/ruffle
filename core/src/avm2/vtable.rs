@@ -630,16 +630,30 @@ impl<'gc> VTable<'gc> {
         // Otherwise, our behavior diverges from Flash Player in certain cases.
         // See the ignored test 'tests/tests/swfs/avm2/weird_superinterface_properties/'
         let internal_ns = context.avm2.namespaces.public_vm_internal();
+
+        // A tabela agora mora atras de um `Gc`, que nao deixa escrever por
+        // dentro — de proposito, porque ela pode estar sendo apontada por
+        // outras classes. Aqui ela nunca esta (quem chega neste caminho pediu
+        // a vtable com o compartilhamento desligado), mas o jeito certo e o
+        // mesmo nos dois casos: montar a nova ao lado e trocar no fim.
+        let mut nova = (*this.resolved_traits).clone();
+        let mut mexeu = false;
+
         for interface in class.all_interfaces() {
             for interface_trait in interface.traits() {
                 let interface_name = interface_trait.name();
                 if !interface_name.namespace().is_public() {
                     let public_name = QName::new(internal_ns, interface_name.local_name());
-                    if let Some(prop) = this.resolved_traits.get(public_name).copied() {
-                        this.resolved_traits.insert(interface_name, prop);
+                    if let Some(prop) = nova.get(public_name).copied() {
+                        nova.insert(interface_name, prop);
+                        mexeu = true;
                     }
                 }
             }
+        }
+
+        if mexeu {
+            this.resolved_traits = Gc::new(context.gc(), nova);
         }
     }
 
