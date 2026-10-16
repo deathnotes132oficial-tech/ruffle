@@ -21,6 +21,37 @@ use fnv::{FnvHashMap, FnvHashSet};
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use weak_table::{PtrWeakKeyHashMap, WeakValueHashMap, traits::WeakElement};
+use std::cell::RefCell;
+
+thread_local! {
+    /// SONDA — quantas unidades de traducao (um DoABC) ja nasceram apontando
+    /// para cada SWF, identificado pela posicao dele na memoria.
+    ///
+    /// Serve pra responder quem prende os SWFs que nunca morrem. O dominio
+    /// guarda TODO script ja definido (`Domain.defs`), o script guarda a
+    /// unidade de traducao, e a unidade guarda o SWF com referencia FORTE
+    /// (`TranslationUnitData.movie`). Como a tabela de bibliotecas e de chave
+    /// fraca, ela so solta quando o SWF morre — e um SWF preso assim nunca
+    /// morre, levando junto todas as figuras decodificadas dele.
+    ///
+    /// RESSALVA HONESTA: a chave e um endereco. Se um SWF morre e outro nasce
+    /// no mesmo lugar, o novo herda a contagem do antigo e aparece como preso
+    /// sem ser. Pra uma sonda que compara ordens de grandeza isso e aceitavel;
+    /// pra decidir um conserto, nao seria.
+    static UNIDADES_POR_SWF: RefCell<FnvHashMap<usize, usize>> =
+        RefCell::new(FnvHashMap::default());
+}
+
+/// Anota que nasceu mais uma unidade de traducao presa a este SWF.
+pub fn anotar_unidade(movie: &Arc<SwfMovie>) {
+    let chave = Arc::as_ptr(movie) as usize;
+    UNIDADES_POR_SWF.with(|m| *m.borrow_mut().entry(chave).or_insert(0) += 1);
+}
+
+fn unidades_de(movie: &Arc<SwfMovie>) -> usize {
+    let chave = Arc::as_ptr(movie) as usize;
+    UNIDADES_POR_SWF.with(|m| m.borrow().get(&chave).copied().unwrap_or(0))
+}
 
 #[derive(Clone)]
 struct MovieSymbol(Arc<SwfMovie>, CharacterId);
@@ -670,6 +701,42 @@ impl<'gc> Library<'gc> {
             }
         }
         (quantas, peso)
+    }
+
+    /// SONDA — onde estao as texturas que ninguem soltou.
+    ///
+    /// Separa os SWFs vivos em dois grupos: os que tem unidade de traducao
+    /// apontando pra eles (presos pelo dominio, nunca morrem) e os demais.
+    /// Para cada grupo soma o peso das texturas vivas.
+    ///
+    /// O QUE A RESPOSTA DECIDE: se quase todo o peso estiver no grupo PRESO,
+    /// a vida da biblioteca esta amarrada a vida do SWF e e isso que precisa
+    /// ser desamarrado. Se estiver no grupo LIVRE, quem segura e outro, e
+    /// procurar no dominio seria perder tempo.
+    pub fn presos_por_script(&self) -> (usize, usize, usize, usize) {
+        let (mut presos, mut bytes_presos) = (0usize, 0usize);
+        let (mut livres, mut bytes_livres) = (0usize, 0usize);
+
+        for (movie, lib) in self.movie_libraries.0.iter() {
+            let mut peso = 0usize;
+            for figura in lib.characters.values() {
+                if let Character::Bitmap(bitmap) = figura
+                    && let Some(bytes) = bitmap.textura_viva()
+                {
+                    peso += bytes;
+                }
+            }
+
+            if unidades_de(&movie) > 0 {
+                presos += 1;
+                bytes_presos += peso;
+            } else {
+                livres += 1;
+                bytes_livres += peso;
+            }
+        }
+
+        (presos, bytes_presos, livres, bytes_livres)
     }
 
     /// Varre as bibliotecas cujo SWF ja morreu.

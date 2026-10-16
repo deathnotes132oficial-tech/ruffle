@@ -93,6 +93,12 @@ impl<'gc> TranslationUnit<'gc> {
         mc: &Mutation<'gc>,
     ) -> Self {
         use std::iter::repeat_n;
+
+        // SONDA — esta unidade vai segurar o SWF com referencia forte, e o
+        // dominio vai segurar esta unidade pra sempre. Anotar aqui e o que
+        // permite, la na biblioteca, saber quais SWFs nunca poderao morrer.
+        crate::library::anotar_unidade(&movie);
+
         let this = TranslationUnitData {
             domain,
             name,

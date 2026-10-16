@@ -1221,11 +1221,35 @@ impl Player {
             }
         });
 
-        self.mutate_with_update_context(|context| {
+        let linha = self.mutate_with_update_context(|context| {
             context.library.limpar_mortas();
             context.library.soltar_texturas_paradas(PRAZO_DA_TEXTURA);
             context.library.soltar_malhas_paradas(PRAZO_DA_TEXTURA);
+
+            // A CONTAGEM VOLTOU, E SO PARA ESTA INVESTIGACAO.
+            //
+            // Ela saiu em 04/10 porque percorrer a biblioteca inteira duas
+            // vezes por segundo so custava, depois que a resposta daquela
+            // pergunta tinha chegado. Agora ha pergunta nova, e e outra:
+            // descobrir QUEM prende os SWFs que nunca morrem. Quando a
+            // resposta vier, isto sai de novo.
+            let (swfs, figuras, um, dois, muitos) = context.library.contagem();
+            let (carregamentos, sem_clipe, pendentes) = context.load_manager.contagem();
+            let (presos, bytes_presos, livres, bytes_livres) =
+                context.library.presos_por_script();
+            let (texturas, bytes_texturas) = context.library.texturas();
+
+            let mb = |bytes: usize| bytes / (1024 * 1024);
+
+            format!(
+                "{swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregamentos} sem-clipe {sem_clipe} pendentes {pendentes} | presos {presos} ({} MB) livres {livres} ({} MB) | texturas {texturas} ({} MB)",
+                mb(bytes_presos),
+                mb(bytes_livres),
+                mb(bytes_texturas),
+            )
         });
+
+        tracing::warn!("BIBLIOTECA: {linha}");
     }
 
     pub fn set_quality(&mut self, quality: StageQuality) {
