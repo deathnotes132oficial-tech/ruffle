@@ -324,6 +324,12 @@ const PRAZO_DA_TEXTURA: u64 = 20;
 const PRAZO_NO_APERTO: u64 = 5;
 
 thread_local! {
+    /// Quando o ultimo retrato do monte por tipo foi tirado.
+    static ULTIMO_RETRATO: std::cell::Cell<Option<Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+thread_local! {
     /// Quando o ultimo aperto foi declarado. A fila volta ao normal sozinha
     /// depois que a poeira baixa — senao o jogo carregaria devagar pra sempre
     /// por causa de um susto de vinte segundos atras.
@@ -1297,6 +1303,61 @@ impl Player {
             mb(largados),
             mb(agora),
         );
+
+        self.quem_ocupa_o_monte();
+    }
+
+    /// QUEM SAO OS MILHOES DE OBJETOS — por tipo, do maior pro menor.
+    ///
+    /// Tres medicoes anteriores erraram porque cada uma testava UMA suspeita:
+    /// as vtables deram 1%, as texturas presas deram 2 MB, o interner nao
+    /// prendia nada. Testar suspeita por suspeita e garantir mais erros.
+    ///
+    /// Isto nao tem suspeita. A copia local do gc-arena guarda o nome do tipo
+    /// dentro de cada objeto; aqui a gente percorre o monte inteiro e conta.
+    /// Quem vaza aparece no topo e cresce sozinho entre uma leitura e outra —
+    /// sem ninguem precisar adivinhar o nome dele antes.
+    ///
+    /// DE DEZ EM DEZ SEGUNDOS, e nao de dois em dois como o resto: percorrer
+    /// milhoes de objetos custa, e um tranco na tela a cada dois segundos
+    /// atrapalharia justamente o teste de ficar parado olhando.
+    fn quem_ocupa_o_monte(&mut self) {
+        const INTERVALO: u64 = 10;
+        const QUANTOS: usize = 12;
+
+        let agora = Instant::now();
+        let passou = ULTIMO_RETRATO.with(|u| match u.get() {
+            Some(antes) => agora.duration_since(antes).as_secs() >= INTERVALO,
+            None => true,
+        });
+        if !passou {
+            return;
+        }
+        ULTIMO_RETRATO.with(|u| u.set(Some(agora)));
+
+        let tipos = self.gc_arena.borrow().tipos_vivos();
+
+        // O nome completo do tipo vem com o caminho inteiro do modulo e some
+        // na tela. O que identifica e o fim: "ruffle_core::avm2::object::
+        // script_object::ScriptObjectData" vira "ScriptObjectData".
+        let curto = |nome: &str| -> String {
+            let sem_generico = nome.split('<').next().unwrap_or(nome);
+            sem_generico
+                .rsplit("::")
+                .next()
+                .unwrap_or(sem_generico)
+                .to_string()
+        };
+
+        let mut linha = String::new();
+        for (nome, quantos) in tipos.iter().take(QUANTOS) {
+            if !linha.is_empty() {
+                linha.push_str(" | ");
+            }
+            linha.push_str(&format!("{} {}", curto(nome), quantos));
+        }
+
+        tracing::warn!("TIPOS: {linha}");
     }
 
     pub fn set_quality(&mut self, quality: StageQuality) {

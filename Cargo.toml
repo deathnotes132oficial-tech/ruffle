@@ -1,4 +1,8 @@
 [workspace]
+# A copia do coletor nao e um membro do projeto: ela e so o destino do
+# [patch.crates-io] la embaixo. Sem este exclude, o cargo reclama de achar
+# um pacote dentro da pasta que nao esta na lista.
+exclude = ["vendor/gc-arena"]
 members = [
     "core",
     "core/macros",
@@ -201,3 +205,15 @@ lto = "off"
 incremental = true
 # Right between the defaults of 16 and 256, for crate fragment caching.
 codegen-units = 64
+
+# A CÓPIA LOCAL DO COLETOR, SÓ PRA MEDIÇÃO.
+#
+# O gc-arena de verdade conta QUANTOS objetos existem, nunca DE QUE TIPO. Com
+# milhões de objetos vivos e um deles vazando, "quantos" não leva a lugar
+# nenhum. Esta cópia guarda o nome do tipo em cada objeto e sabe percorrer o
+# monte contando por tipo.
+#
+# Custa ~8 bytes por objeto e não deve ir pra produção: é instrumento de
+# investigação, não conserto.
+[patch.crates-io]
+gc-arena = { path = "vendor/gc-arena" }
