@@ -3,6 +3,44 @@ use ruffle_wstr::{WStr, WString, panic_on_invalid_length, ptr as wptr, wstr_impl
 use std::cell::Cell;
 use std::ops::Deref;
 
+// SONDA — quantas strings vivas, de que especie, e quantos bytes de buffer.
+//
+// A medicao por tipo ja apontou as strings: +1,7 milhao em 15 minutos com o
+// jogo parado. Falta separar as duas causas possiveis, que pedem consertos
+// opostos:
+//
+//   PROPRIA    tem buffer proprio. Muitas proprias pequenas = o jogo esta
+//              acumulando strings em algum lugar, e o defeito nao e nosso.
+//   DEPENDENTE nao copia nada: aponta pra dentro do buffer de outra e MANTEM
+//              ESSE BUFFER INTEIRO VIVO. Poucas proprias gigantes seguradas
+//              por muitas dependentes = a amplificacao e nossa, e tem conserto
+//              aqui dentro.
+//
+// Os numeros so fecham porque o decremento mora no Drop: todo caminho de
+// criacao passa por `from_raw` ou `new_dependent_raw`, e todo caminho de
+// morte passa pelo Drop.
+thread_local! {
+    static VIVAS_PROPRIAS: Cell<i64> = const { Cell::new(0) };
+    static VIVAS_DEPENDENTES: Cell<i64> = const { Cell::new(0) };
+    static BYTES_DE_BUFFER: Cell<i64> = const { Cell::new(0) };
+    static COPIAS_FORCADAS: Cell<i64> = const { Cell::new(0) };
+}
+
+/// Devolve (proprias, dependentes, bytes de buffer, copias forcadas).
+pub fn contagem_de_strings() -> (i64, i64, i64, i64) {
+    (
+        VIVAS_PROPRIAS.with(|c| c.get()),
+        VIVAS_DEPENDENTES.with(|c| c.get()),
+        BYTES_DE_BUFFER.with(|c| c.get()),
+        COPIAS_FORCADAS.with(|c| c.get()),
+    )
+}
+
+/// Anota que o conserto da fatia entrou em acao mais uma vez.
+pub fn anotar_copia_forcada() {
+    COPIAS_FORCADAS.with(|c| c.set(c.get() + 1));
+}
+
 /// Internal representation of `AvmAtom`s and (owned) `AvmString`s.
 ///
 /// Using this type directly is dangerous, as it can be used to violate
@@ -35,6 +73,11 @@ pub struct AvmStringRepr<'gc> {
 impl<'gc> AvmStringRepr<'gc> {
     pub fn from_raw(s: WString, interned: bool) -> Self {
         let (ptr, meta, cap) = s.into_raw_parts();
+        VIVAS_PROPRIAS.with(|c| c.set(c.get() + 1));
+        BYTES_DE_BUFFER.with(|c| {
+            let largura = if meta.is_wide() { 2 } else { 1 };
+            c.set(c.get() + (cap as i64) * largura)
+        });
         let capacity = Cell::new(wptr::WStrMetadata::new32(cap, interned));
         Self {
             ptr,
@@ -64,6 +107,15 @@ impl<'gc> AvmStringRepr<'gc> {
         wstr: &'gc WStr,
         interned: bool,
     ) -> Self {
+        // Sem dono e uma string ESTATICA, que nao copia nem depende de
+        // ninguem. Ela entra na conta das proprias porque e assim que o Drop
+        // vai descontar (ele so olha se ha dono); contar de um jeito aqui e
+        // descontar de outro la faria o numero derivar pra baixo sozinho.
+        if owner.is_some() {
+            VIVAS_DEPENDENTES.with(|c| c.set(c.get() + 1));
+        } else {
+            VIVAS_PROPRIAS.with(|c| c.set(c.get() + 1));
+        }
         Self {
             owner,
             ptr: wstr as *const WStr as *mut (),
@@ -182,8 +234,18 @@ impl<'gc> AvmStringRepr<'gc> {
 
 impl Drop for AvmStringRepr<'_> {
     fn drop(&mut self) {
+        if self.owner.is_some() {
+            VIVAS_DEPENDENTES.with(|c| c.set(c.get() - 1));
+        } else {
+            VIVAS_PROPRIAS.with(|c| c.set(c.get() - 1));
+        }
+
         let cap = self.capacity.get().len32();
         if cap > 0 {
+            BYTES_DE_BUFFER.with(|c| {
+                let largura = if self.meta.is_wide() { 2 } else { 1 };
+                c.set(c.get() - (cap as i64) * largura)
+            });
             // SAFETY: we drop the `WString` we logically own.
             debug_assert!(self.owner.is_none());
             let _ = unsafe { WString::from_raw_parts(self.ptr, self.meta, cap) };

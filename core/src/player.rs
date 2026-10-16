@@ -1358,6 +1358,23 @@ impl Player {
         }
 
         tracing::warn!("TIPOS: {linha}");
+
+        // AS STRINGS, SEPARADAS POR ESPECIE.
+        //
+        // "proprias" tem buffer proprio; "dependentes" sao fatias que nao
+        // copiaram e seguram o buffer de outra. "buffer" e o peso real de
+        // todos os buffers vivos — e o numero que diz se as strings sao mesmo
+        // a memoria, em vez de so serem muitas.
+        //
+        // "copias" conta quantas vezes o conserto da fatia preferiu copiar a
+        // segurar um buffer grande. Se ele ficar em zero, o corte nao esta
+        // pegando e a hipotese da amplificacao cai.
+        let (proprias, dependentes, bytes_buffer, copias) =
+            crate::string::contagem_de_strings();
+        tracing::warn!(
+            "STRINGS: proprias {proprias} dependentes {dependentes} | buffer {} MB | copias {copias}",
+            bytes_buffer / (1024 * 1024),
+        );
     }
 
     pub fn set_quality(&mut self, quality: StageQuality) {

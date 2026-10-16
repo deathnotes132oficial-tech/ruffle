@@ -46,7 +46,41 @@ impl<'gc> AvmString<'gc> {
         Self(Gc::new(gc_context, repr))
     }
 
+    /// Uma fatia de outra string.
+    ///
+    /// O JEITO BARATO COBRA DEPOIS. Por padrao uma fatia nao copia nada: ela
+    /// aponta pra dentro do buffer da original e, com isso, MANTEM O BUFFER
+    /// INTEIRO VIVO. Pegar dez caracteres de um texto de cinquenta mil deixa
+    /// os cinquenta mil na memoria enquanto a fatia existir.
+    ///
+    /// Pra um punhado de fatias isso e otimo — evita copia. Num jogo que
+    /// mastiga XML sem parar, vira um deposito: medimos 4 milhoes de strings
+    /// vivas crescendo 1,7 milhao a cada quinze minutos com o jogo PARADO.
+    ///
+    /// Entao, quando a fatia e pequena perto do que ela segura, copiar sai
+    /// MAIS BARATO que apontar. Os cortes abaixo existem pra so pagar a copia
+    /// quando ela compensa:
+    ///
+    ///   - buffer do dono acima de 256 caracteres — abaixo disso o desperdicio
+    ///     nao paga nem o custo de copiar;
+    ///   - fatia usando menos de um quarto dele — e o ponto em que segurar o
+    ///     resto deixa de ser detalhe e vira o custo principal.
+    ///
+    /// Isto nao muda o que o programa enxerga: a string resultante e a mesma,
+    /// so muda de quem ela depende.
     pub fn substring(mc: &Mutation<'gc>, string: AvmString<'gc>, start: usize, end: usize) -> Self {
+        const LIMITE_DA_FATIA: usize = 256;
+
+        let dono = string.0.owner().unwrap_or(string.0);
+        let tamanho_preso = dono.as_wstr().len();
+        let tamanho_util = end.saturating_sub(start);
+
+        if tamanho_preso > LIMITE_DA_FATIA && tamanho_util * 4 < tamanho_preso {
+            super::repr::anotar_copia_forcada();
+            let copia = WString::from(&string.as_wstr()[start..end]);
+            return Self::new(mc, copia);
+        }
+
         let repr = AvmStringRepr::new_dependent(string.0, start, end);
         Self(Gc::new(mc, repr))
     }

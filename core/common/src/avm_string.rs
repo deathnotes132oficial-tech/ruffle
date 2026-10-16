@@ -14,3 +14,6 @@ pub use avm_string::AvmString;
 pub use common::CommonStrings;
 pub use context::{HasStringContext, StringContext};
 pub use interner::{AvmAtom, AvmStringInterner};
+
+// SONDA — ver `repr::contagem_de_strings`.
+pub use repr::contagem_de_strings;
