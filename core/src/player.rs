@@ -1369,6 +1369,16 @@ impl Player {
         // "copias" conta quantas vezes o conserto da fatia preferiu copiar a
         // segurar um buffer grande. Se ele ficar em zero, o corte nao esta
         // pegando e a hipotese da amplificacao cai.
+        // AS VTABLES — o conserto desta rodada.
+        //
+        // Cada simbolo da biblioteca de um SWF vira uma classe que estende
+        // MovieClip e nao acrescenta nada. Antes, cada uma copiava as ~167
+        // entradas herdadas; agora aponta para a tabela do pai. "compart" e
+        // quantas aproveitaram; se esse numero for uma fatia grande do total,
+        // o conserto pegou.
+        let (compartilhadas, copiadas) = crate::avm2::contagem_de_vtables();
+        tracing::warn!("VTABLES: compart {compartilhadas} proprias {copiadas}");
+
         let (proprias, dependentes, bytes_buffer, copias) =
             crate::string::contagem_de_strings();
         tracing::warn!(

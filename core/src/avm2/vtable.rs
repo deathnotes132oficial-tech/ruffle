@@ -14,20 +14,55 @@ use crate::string::{AvmString, StringContext};
 use gc_arena::barrier::{field, unlock};
 use gc_arena::lock::Lock;
 use gc_arena::{Collect, Gc, Mutation};
+use std::cell::Cell;
 use std::collections::HashMap;
+
+thread_local! {
+    /// Quantas vtables apontaram para a tabela do pai em vez de copiar.
+    static COMPARTILHADAS: Cell<u64> = const { Cell::new(0) };
+    /// Quantas tiveram mesmo que montar a propria.
+    static COPIADAS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Devolve (compartilhadas, copiadas) desde que a pagina abriu.
+///
+/// E o numero que julga o conserto: se "compartilhadas" for uma fatia grande
+/// do total, as classes vazias dos simbolos pararam de duplicar a tabela do
+/// MovieClip. Se for perto de zero, a aposta estava errada.
+pub fn contagem_de_vtables() -> (u64, u64) {
+    (
+        COMPARTILHADAS.with(|c| c.get()),
+        COPIADAS.with(|c| c.get()),
+    )
+}
 
 #[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct VTable<'gc>(Gc<'gc, VTableData<'gc>>);
 
-#[derive(Collect, Default)]
+#[derive(Collect)]
 #[collect(no_drop)]
 struct VTableData<'gc> {
     scope: Option<ScopeChain<'gc>>,
 
     protected_namespace: Option<Namespace<'gc>>,
 
-    resolved_traits: PropertyMap<'gc, Property>,
+    /// A TABELA ACHATADA DE PROPRIEDADES — COMPARTILHADA QUANDO DA.
+    ///
+    /// Ela guarda, de uma vez, as propriedades da classe E as de todos os
+    /// ancestrais. Pra uma classe que herda de MovieClip sao ~167 entradas,
+    /// algo como 8 KB.
+    ///
+    /// O problema: num jogo Flash cada simbolo da biblioteca vira uma classe
+    /// que estende MovieClip e NAO ACRESCENTA NADA. Cada uma dessas ganhava
+    /// sua propria copia das mesmas 167 entradas. Medido no DDTank: 110.786
+    /// vtables vivas para 2.653 classes — cerca de 40 copias de cada, uma por
+    /// SWF carregado, e nenhuma morre.
+    ///
+    /// Como ela nunca e alterada depois de montada (so `get` e `iter`), a
+    /// subclasse que nao acrescenta nada pode simplesmente APONTAR para a
+    /// tabela do pai em vez de copia-la. Por isso o `Gc`.
+    resolved_traits: Gc<'gc, PropertyMap<'gc, Property>>,
 
     /// Use hashmaps for the metadata tables because metadata will rarely be present on traits
     slot_metadata_table: HashMap<usize, Box<[Metadata<'gc>]>>,
@@ -72,7 +107,20 @@ impl<'gc> ClassBoundMethod<'gc> {
 
 impl<'gc> VTable<'gc> {
     pub fn empty(mc: &Mutation<'gc>) -> Self {
-        VTable(Gc::new(mc, VTableData::default()))
+        // Montada na mao porque `resolved_traits` agora e um `Gc`, e `Gc` nao
+        // tem Default — nao haveria onde alocar sem a mutacao em maos.
+        VTable(Gc::new(
+            mc,
+            VTableData {
+                scope: None,
+                protected_namespace: None,
+                resolved_traits: Gc::new(mc, PropertyMap::new()),
+                slot_metadata_table: HashMap::new(),
+                disp_metadata_table: HashMap::new(),
+                slot_table: Box::new([]),
+                method_table: Box::new([]),
+            },
+        ))
     }
 
     /// Builds a new vtable by calculating the flattened list of instance traits
@@ -89,6 +137,8 @@ impl<'gc> VTable<'gc> {
             super_class_obj,
             scope,
             superclass_vtable,
+            mc,
+            true,
         )?;
         Ok(VTable(Gc::new(mc, this)))
     }
@@ -101,11 +151,17 @@ impl<'gc> VTable<'gc> {
         superclass_vtable: Option<Self>,
         context: &UpdateContext<'gc>,
     ) -> Result<Self, VTableInitError> {
+        // Compartilhar esta DESLIGADO aqui porque o passo seguinte,
+        // `copy_interface_properties`, ACRESCENTA entradas na tabela. Se ela
+        // fosse a tabela do pai, escrever nela estragaria a classe de cima e
+        // todas as outras que a usam.
         let mut this = Self::init_vtable(
             defining_class_def,
             super_class_obj,
             scope,
             superclass_vtable,
+            context.gc(),
+            false,
         )?;
         Self::copy_interface_properties(&mut this, defining_class_def, context);
 
@@ -113,7 +169,7 @@ impl<'gc> VTable<'gc> {
     }
 
     pub fn resolved_traits(self) -> &'gc PropertyMap<'gc, Property> {
-        &Gc::as_ref(self.0).resolved_traits
+        Gc::as_ref(Gc::as_ref(self.0).resolved_traits)
     }
 
     pub fn get_metadata_for_slot(self, slot_id: usize) -> Option<&'gc [Metadata<'gc>]> {
@@ -218,6 +274,8 @@ impl<'gc> VTable<'gc> {
         super_class_obj: Option<ClassObject<'gc>>,
         scope: Option<ScopeChain<'gc>>,
         superclass_vtable: Option<Self>,
+        mc: &Mutation<'gc>,
+        pode_compartilhar: bool,
     ) -> Result<VTableData<'gc>, VTableInitError> {
         // Let's talk about slot_ids and disp_ids.
         // Specification is one thing, but reality is another.
@@ -270,6 +328,22 @@ impl<'gc> VTable<'gc> {
         // so long-term it's still something we should verify.
         // (and it's far from the only verification check we lack anyway)
 
+        // DA PRA APONTAR EM VEZ DE COPIAR?
+        //
+        // So quando esta classe nao mexe na tabela de jeito nenhum: nao
+        // declara nada de proprio, e nao tem namespace protegido pra copiar do
+        // pai com outro nome. Nesse caso a tabela dela e, entrada por entrada,
+        // a mesma do pai — e ai apontar e copiar dao no mesmo, so que um deles
+        // nao custa 8 KB.
+        let tabela_do_pai = superclass_vtable.map(|v| v.0.resolved_traits);
+        let compartilhar = pode_compartilhar
+            && tabela_do_pai.is_some()
+            && defining_class_def.traits().is_empty()
+            && !(defining_class_def.protected_namespace().is_some()
+                && superclass_vtable
+                    .map(|v| v.0.protected_namespace.is_some())
+                    .unwrap_or(false));
+
         let mut resolved_traits = PropertyMap::new();
         let mut slot_metadata_table = HashMap::new();
         let mut disp_metadata_table = HashMap::new();
@@ -284,7 +358,9 @@ impl<'gc> VTable<'gc> {
         let mut force_auto_assign_slots = false;
 
         if let Some(superclass_vtable) = superclass_vtable {
-            resolved_traits = superclass_vtable.resolved_traits().clone();
+            if !compartilhar {
+                resolved_traits = superclass_vtable.resolved_traits().clone();
+            }
             slot_metadata_table = superclass_vtable.0.slot_metadata_table.clone();
             disp_metadata_table = superclass_vtable.0.disp_metadata_table.clone();
             slot_table.extend_from_slice(&superclass_vtable.0.slot_table);
@@ -521,6 +597,17 @@ impl<'gc> VTable<'gc> {
                 });
             }
         }
+
+        let resolved_traits = match (compartilhar, tabela_do_pai) {
+            (true, Some(do_pai)) => {
+                COMPARTILHADAS.with(|c| c.set(c.get() + 1));
+                do_pai
+            }
+            _ => {
+                COPIADAS.with(|c| c.set(c.get() + 1));
+                Gc::new(mc, resolved_traits)
+            }
+        };
 
         Ok(VTableData {
             scope,

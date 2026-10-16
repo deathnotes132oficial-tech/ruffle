@@ -83,6 +83,9 @@ pub mod vector;
 mod verify;
 mod vtable;
 
+// SONDA — quantas vtables apontaram pra tabela do pai em vez de copiar.
+pub use vtable::contagem_de_vtables;
+
 pub use crate::avm2::activation::Activation;
 pub use crate::avm2::array::ArrayStorage;
 pub use crate::avm2::call_stack::CallStack;
