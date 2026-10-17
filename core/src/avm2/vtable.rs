@@ -223,7 +223,7 @@ impl<'gc> VTable<'gc> {
     /// que ela herda. Na tabela achatada isso acontecia porque o proprio era
     /// inserido por cima do herdado; aqui acontece porque o proprio e
     /// consultado primeiro.
-    pub fn get_trait(self, name: &Multiname<'gc>) -> Option<Property> {
+    fn buscar_trait_na_cadeia(self, name: &Multiname<'gc>) -> Option<Property> {
         let mut atual = Some(self);
         while let Some(v) = atual {
             if let Some(prop) = Gc::as_ref(v.0).traits_proprios.get_for_multiname(name) {
@@ -305,7 +305,7 @@ impl<'gc> VTable<'gc> {
             return None;
         }
 
-        self.get_trait(name)
+        self.buscar_trait_na_cadeia(name)
     }
 
     /// Coerces `value` to the type of the slot with id `slot_id`
@@ -328,7 +328,7 @@ impl<'gc> VTable<'gc> {
     }
 
     pub fn has_trait(self, name: &Multiname<'gc>) -> bool {
-        self.get_trait(name).is_some()
+        self.buscar_trait_na_cadeia(name).is_some()
     }
 
     pub fn get_method(self, disp_id: usize) -> Option<Method<'gc>> {
