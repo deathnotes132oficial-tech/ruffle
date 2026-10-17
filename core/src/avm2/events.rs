@@ -489,7 +489,7 @@ fn dispatch_event_to_target<'gc>(
 
             Avm2::uncaught_error(
                 activation,
-                None, // TODO we need to set this, but how?
+                Some(handler.executable().as_method().owner_movie()),
                 err,
                 &format!("Error dispatching event \"{}\"", event_name),
             );
@@ -568,6 +568,46 @@ pub fn dispatch_event<'gc>(
 
     // If the target is set, the event was handled
     event.event().target.is_some()
+}
+
+/// Dispatches an `uncaughtError` event through `chain`, the
+/// `uncaughtErrorEvents` objects of a movie's `LoaderInfo` and of each
+/// `Loader` and `LoaderInfo` above it, nearest first: capturing from the top
+/// down, at the movie's own, then bubbling back up.
+///
+/// As Flash documents, the object of a `Loader` and that of the `LoaderInfo`
+/// of the movie it loaded are paired: `stopPropagation` in one of them still
+/// lets the event reach the other.
+pub fn dispatch_uncaught_error_event<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    chain: &[Object<'gc>],
+    event: EventObject<'gc>,
+) {
+    let target = chain[0];
+    let steps = (1..chain.len())
+        .rev()
+        .map(|index| (index, EventPhase::Capturing))
+        .chain(std::iter::once((0, EventPhase::AtTarget)))
+        .chain((1..chain.len()).map(|index| (index, EventPhase::Bubbling)));
+
+    let mut stopped_at = None;
+    for (index, phase) in steps {
+        if event.event().is_propagation_stopped_immediately()
+            || stopped_at.is_some_and(|stopper| index != partner(stopper))
+        {
+            break;
+        }
+
+        event.event_mut(activation.gc()).set_phase(phase);
+        dispatch_event_to_target(activation, chain[index], target, chain[index], event, false);
+        if stopped_at.is_none() && event.event().is_propagation_stopped() {
+            stopped_at = Some(index);
+        }
+    }
+}
+
+fn partner(index: usize) -> usize {
+    index ^ 1
 }
 
 /// Like `dispatch_event`, but does not run the Capturing and Bubbling phases,

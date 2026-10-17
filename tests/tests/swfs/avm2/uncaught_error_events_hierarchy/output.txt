@@ -1,0 +1,11 @@
+boom1, cancelled and stopped by the loader's capture listener:
+  capture root loaderInfo: boom1
+  capture loader: boom1
+  target child loaderInfo: boom1
+boom2, thrown by the child of a Loader off the display list, cancelled by the root:
+  capture root loaderInfo: boom2
+  capture off-list loader: boom2
+  target off-list child loaderInfo: boom2
+  bubble off-list loader: boom2
+  bubble root loaderInfo: boom2
+done

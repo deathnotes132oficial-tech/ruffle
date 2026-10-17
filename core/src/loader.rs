@@ -605,6 +605,13 @@ pub enum MovieLoaderVMData<'gc> {
 }
 
 impl<'gc> MovieLoaderVMData<'gc> {
+    fn loader_info(&self) -> Option<LoaderInfoObject<'gc>> {
+        match self {
+            MovieLoaderVMData::Avm2 { loader_info, .. } => Some(*loader_info),
+            MovieLoaderVMData::Avm1 { .. } => None,
+        }
+    }
+
     fn load_bytes_info(&self) -> Option<LoadBytesInfo> {
         match self {
             MovieLoaderVMData::Avm2 {
@@ -1821,7 +1828,8 @@ impl<'gc> MovieLoader<'gc> {
         };
 
         if sniffed_type != ContentType::Unknown {
-            uc.library.set_loaded_by(movie, started_by);
+            uc.library
+                .set_loaded_by(movie, started_by, vm_data.loader_info());
         }
 
         if let MovieLoaderVMData::Avm2 { loader_info, .. } = vm_data {

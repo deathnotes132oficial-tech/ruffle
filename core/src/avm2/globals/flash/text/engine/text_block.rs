@@ -463,7 +463,8 @@ pub fn do_create_text_line<'gc>(
             // exception, and returns `null` from this method.
             let error = make_error_2175(activation);
 
-            Avm2::uncaught_error(activation, None, error, "Error creating TextLine");
+            let movie = activation.caller_movie();
+            Avm2::uncaught_error(activation, movie, error, "Error creating TextLine");
 
             return Ok(Value::Null);
         }

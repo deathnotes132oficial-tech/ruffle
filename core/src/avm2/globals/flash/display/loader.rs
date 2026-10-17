@@ -30,7 +30,8 @@ pub fn loader_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     // Loader does not have an associated `Character` variant, and can never be
     // instantiated from the timeline.
-    let display_object = LoaderDisplay::empty(activation, activation.caller_movie_or_root()).into();
+    let creator = activation.caller_movie_or_root();
+    let display_object = LoaderDisplay::empty(activation, creator).into();
     let loader = initialize_for_allocator(activation.context, display_object, class);
 
     // Note that the initialization of `_contentLoaderInfo` is intentionally done here,
@@ -48,6 +49,7 @@ pub fn loader_allocator<'gc>(
             SwfMovieData::empty(movie.version(), Some(movie.url().into())),
         ),
         Some(loader),
+        LoaderInfoObject::of_movie(activation.context, creator),
         None,
         false,
     )?;
@@ -55,6 +57,17 @@ pub fn loader_allocator<'gc>(
     loader.set_slot(
         loader_slots::_CONTENT_LOADER_INFO,
         loader_info.into(),
+        activation,
+    )?;
+
+    let uncaught_error_events = activation
+        .avm2()
+        .classes()
+        .uncaughterrorevents
+        .construct(activation, &[])?;
+    loader.set_slot(
+        loader_slots::_UNCAUGHT_ERROR_EVENTS,
+        uncaught_error_events,
         activation,
     )?;
 

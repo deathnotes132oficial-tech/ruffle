@@ -72,6 +72,7 @@ impl<'gc> Timers<'gc> {
             // TODO: Can we avoid these clones?
             let callback = timer.callback.clone();
             let expected_id = timer.id;
+            let owner = timer.owner;
 
             let cancel_timer = match callback {
                 TimerCallback::Avm1Function { func, params } => {
@@ -167,7 +168,7 @@ impl<'gc> Timers<'gc> {
                         Err(err) => {
                             Avm2::uncaught_error(
                                 &mut avm2_activation,
-                                None, // TODO do we need to set this?
+                                Some(owner),
                                 err,
                                 "Error in AVM2 timer callback",
                             );

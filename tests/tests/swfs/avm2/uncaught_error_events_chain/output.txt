@@ -1,0 +1,20 @@
+the Loader has its own uncaughtErrorEvents: true
+boom1, thrown by a child listener, not cancelled:
+  capture root loaderInfo: boom1
+  capture loader: boom1
+  target child loaderInfo: boom1
+  bubble loader: boom1
+  bubble root loaderInfo: boom1
+Error: boom1
+	at Child/onFrame()
+boom2, thrown by a child setTimeout, stopped at the target, cancelled by the loader:
+  capture root loaderInfo: boom2
+  capture loader: boom2
+  target child loaderInfo: boom2
+  bubble loader: boom2
+boom3, thrown by the root, cancelled at its own loaderInfo:
+  target root loaderInfo: boom3
+boom4, thrown by a child listener, cancelled and stopped by the loader's capture listener:
+  capture root loaderInfo: boom4
+  capture loader: boom4
+done

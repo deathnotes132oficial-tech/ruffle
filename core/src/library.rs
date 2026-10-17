@@ -1,4 +1,5 @@
 use crate::avm1::{PropertyMap as Avm1PropertyMap, PropertyMap};
+use crate::avm2::object::{LoaderInfoObject, LoaderInfoObjectWeak};
 use crate::avm2::{
     Class as Avm2Class, ClassWeak as Avm2ClassWeak, Domain as Avm2Domain,
     TranslationUnitWeak as Avm2TranslationUnitWeak,
@@ -225,6 +226,11 @@ pub struct MovieLibrary<'gc> {
     /// up misses this one.
     ancestors: Vec<SwfMovieWeak<'gc>>,
 
+    /// The `LoaderInfo` of the AS3 `Loader` this movie was loaded into. Held
+    /// weakly because that `LoaderInfo` holds the content, which anchors this
+    /// library: held strongly, the library would keep itself alive.
+    loader_info: Option<LoaderInfoObjectWeak<'gc>>,
+
     /// Whether this library is exempt from being released. See [`Pin`].
     pin: Pin,
 
@@ -285,6 +291,7 @@ impl<'gc> MovieLibrary<'gc> {
             content_root: None,
             translation_units: Vec::new(),
             ancestors: Vec::new(),
+            loader_info: None,
             pin: Pin::None,
             kept: false,
         }
@@ -298,6 +305,7 @@ impl<'gc> MovieLibrary<'gc> {
         cc.trace(&self.content_root);
         cc.trace(&self.translation_units);
         cc.trace(&self.ancestors);
+        cc.trace(&self.loader_info);
     }
 
     /// Traces everything this library owns: its movie, characters, fonts,
@@ -829,7 +837,12 @@ impl<'gc> Library<'gc> {
         self.movie_libraries.known_movies()
     }
 
-    pub fn set_loaded_by(&mut self, movie: SwfMovie<'gc>, started_by: SwfMovie<'gc>) {
+    pub fn set_loaded_by(
+        &mut self,
+        movie: SwfMovie<'gc>,
+        started_by: SwfMovie<'gc>,
+        loader_info: Option<LoaderInfoObject<'gc>>,
+    ) {
         let ancestors = std::iter::once(started_by.downgrade())
             .chain(
                 self.library_for_movie(started_by)
@@ -837,7 +850,9 @@ impl<'gc> Library<'gc> {
                     .flat_map(|library| library.ancestors.iter().copied()),
             )
             .collect();
-        self.library_for_movie_mut(movie).ancestors = ancestors;
+        let library = self.library_for_movie_mut(movie);
+        library.ancestors = ancestors;
+        library.loader_info = loader_info.map(LoaderInfoObject::downgrade);
     }
 
     /// Every movie that `movie`'s code loaded, at any depth.
@@ -853,6 +868,16 @@ impl<'gc> Library<'gc> {
             })
             .map(|(loaded, _)| *loaded)
             .collect()
+    }
+
+    /// The `LoaderInfo` of the AS3 `Loader` that loaded `movie`, while it is
+    /// alive.
+    pub fn loader_info(
+        &self,
+        mc: &Mutation<'gc>,
+        movie: SwfMovie<'gc>,
+    ) -> Option<LoaderInfoObject<'gc>> {
+        self.library_for_movie(movie)?.loader_info?.upgrade(mc)
     }
 
     /// Marks `movie` as the movie the player was started with, whose library

@@ -347,7 +347,7 @@ impl<'gc> TDisplayObject<'gc> for Bitmap<'gc> {
                 if let Err(err) = call_result {
                     Avm2::uncaught_error(
                         &mut activation,
-                        Some(self.into()),
+                        Some(self.movie()),
                         err,
                         "Error running AVM2 construction for bitmap",
                     );
@@ -380,7 +380,7 @@ impl<'gc> TDisplayObject<'gc> for Bitmap<'gc> {
                 if let Err(err) = call_result {
                     Avm2::uncaught_error(
                         &mut activation,
-                        Some(self.into()),
+                        Some(self.movie()),
                         err,
                         "Error running AVM2 construction for bitmap data",
                     );

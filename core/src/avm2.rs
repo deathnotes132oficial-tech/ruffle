@@ -8,6 +8,7 @@ use crate::avm2::error::{
     make_error_2022, make_error_2023,
 };
 use crate::avm2::function::exec;
+use crate::avm2::globals::slots::flash_display_loader as loader_slots;
 use crate::avm2::globals::{
     SystemClassDefs, SystemClasses, init_builtin_system_class_defs, init_builtin_system_classes,
     init_native_system_classes,
@@ -20,7 +21,7 @@ use crate::avm2::script::{Script, TranslationUnit};
 use crate::avm2::stack::Stack;
 use crate::character::Character;
 use crate::context::UpdateContext;
-use crate::display_object::{DisplayObject, MovieClip, TDisplayObject};
+use crate::display_object::{MovieClip, TDisplayObject};
 use crate::string::{AvmString, StringContext};
 use crate::tag_utils::SwfMovie;
 use crate::{PlayerMode, PlayerRuntime};
@@ -174,6 +175,8 @@ pub struct Avm2<'gc> {
     /// skua #13: every `Dictionary(true)` created, so dead keys can be removed at finalization.
     pub skua_weak_dictionaries: Vec<crate::avm2::object::DictionaryObjectWeak<'gc>>,
 
+    dispatching_uncaught_error: bool,
+
     alias_to_class_map: FnvHashMap<AvmString<'gc>, ClassObject<'gc>>,
     class_to_alias_map: FnvHashMap<Class<'gc>, AvmString<'gc>>,
 
@@ -231,6 +234,7 @@ impl<'gc> Avm2<'gc> {
             native_fast_call_list: Default::default(),
             broadcast_list: Default::default(),
             skua_weak_dictionaries: Vec::new(),
+            dispatching_uncaught_error: false,
 
             alias_to_class_map: Default::default(),
             class_to_alias_map: Default::default(),
@@ -729,16 +733,36 @@ impl<'gc> Avm2<'gc> {
         self.optimizer_enabled = value;
     }
 
-    // Report an uncaught AVM2 error.
-    // TODO should the `display_object` parameter be optional or not?
+    /// Report an uncaught AVM2 error, thrown by the code of `movie` when it is
+    /// known.
+    ///
+    /// The error is dispatched as an `uncaughtError` event first. A listener
+    /// that cancels it keeps it from content's trace output, as in Flash; the
+    /// log still reports it, at WARN under the target
+    /// `ruffle_core::avm2::uncaught_cancelled`, with the URL of `movie` in
+    /// the field `movie`.
     #[cold]
     #[inline(never)]
     pub fn uncaught_error(
         activation: &mut Activation<'_, 'gc>,
-        _display_object: Option<DisplayObject<'gc>>,
+        movie: Option<SwfMovie<'gc>>,
         error: Error<'gc>,
         extra_info: &str,
     ) {
+        if Self::dispatch_uncaught_error(activation, movie, &error)
+            .is_some_and(|event| event.event().is_cancelled())
+        {
+            let stringified = error.to_string(activation);
+            tracing::warn!(
+                target: "ruffle_core::avm2::uncaught_cancelled",
+                movie = movie.as_ref().map_or("", |movie| movie.url()),
+                "{}: {}",
+                extra_info,
+                stringified
+            );
+            return;
+        }
+
         // Flash Player traces uncaught errors, but when trace is disabled
         // (e.g. release mode), FP doesn't stringify the error for the second
         // time, which is observable.
@@ -750,9 +774,57 @@ impl<'gc> Avm2<'gc> {
         // This will print the properly formatted error
         let stringified = error.to_string(activation);
         tracing::error!("{}: {}", extra_info, stringified);
-
-        // TODO: push the error onto `loaderInfo.uncaughtErrorEvents`
     }
+
+    fn dispatch_uncaught_error(
+        activation: &mut Activation<'_, 'gc>,
+        movie: Option<SwfMovie<'gc>>,
+        error: &Error<'gc>,
+    ) -> Option<EventObject<'gc>> {
+        let error = error.as_avm_error()?;
+        if activation.context.avm2.dispatching_uncaught_error {
+            return None;
+        }
+        let movie = movie.unwrap_or(*activation.context.root_swf);
+        let loader_info = LoaderInfoObject::of_movie(activation.context, movie)?;
+
+        let chain = uncaught_error_chain(loader_info);
+        let class = activation.avm2().classes().uncaughterrorevent;
+        let event = EventObject::from_class_and_args(
+            activation,
+            class,
+            &[
+                AvmString::new_utf8(activation.gc(), "uncaughtError").into(),
+                true.into(),
+                true.into(),
+                error,
+            ],
+        );
+
+        activation.context.avm2.dispatching_uncaught_error = true;
+        events::dispatch_uncaught_error_event(activation, &chain, event);
+        activation.context.avm2.dispatching_uncaught_error = false;
+
+        Some(event)
+    }
+}
+
+fn uncaught_error_chain<'gc>(mut loader_info: LoaderInfoObject<'gc>) -> Vec<Object<'gc>> {
+    let mut chain = vec![loader_info.uncaught_error_events()];
+    while let Some(loader) = loader_info.loader() {
+        chain.push(
+            loader
+                .get_slot(loader_slots::_UNCAUGHT_ERROR_EVENTS)
+                .as_object()
+                .expect("Loader allocator sets _uncaughtErrorEvents"),
+        );
+        let Some(creator) = loader_info.creator() else {
+            break;
+        };
+        chain.push(creator.uncaught_error_events());
+        loader_info = creator;
+    }
+    chain
 }
 
 pub trait Avm2StrRepresentable: Sized {

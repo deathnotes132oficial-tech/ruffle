@@ -337,7 +337,7 @@ impl<'gc> MovieClip<'gc> {
             // The root movie doesn't have a `Loader`
             // We will replace this with a `LoaderStream::Swf` later in this function
             let loader_info =
-                LoaderInfoObject::not_yet_loaded(activation, movie, None, None, false)
+                LoaderInfoObject::not_yet_loaded(activation, movie, None, None, None, false)
                     .expect("Failed to construct LoaderInfoObject");
             loader_info.set_expose_content();
             loader_info.set_content_type(ContentType::Swf);
@@ -731,7 +731,7 @@ impl<'gc> MovieClip<'gc> {
 
                     Avm2::uncaught_error(
                         &mut temp_activation,
-                        Some(self.into()),
+                        Some(self.movie()),
                         err,
                         "Error loading AVM2 ABC",
                     );
@@ -773,7 +773,7 @@ impl<'gc> MovieClip<'gc> {
 
                     Avm2::uncaught_error(
                         &mut temp_activation,
-                        Some(self.into()),
+                        Some(self.movie()),
                         err,
                         "Error loading AVM2 ABC",
                     );
@@ -2153,7 +2153,7 @@ impl<'gc> MovieClip<'gc> {
 
                 Avm2::uncaught_error(
                     &mut activation,
-                    Some(self.into()),
+                    Some(self.movie()),
                     e,
                     "Error running AVM2 construction for movie clip",
                 );
@@ -2514,7 +2514,7 @@ impl<'gc> MovieClip<'gc> {
                     ) {
                         Avm2::uncaught_error(
                             &mut activation,
-                            Some(self.into()),
+                            Some(self.movie()),
                             e,
                             "Error running AVM2 frame script",
                         );
@@ -4467,7 +4467,7 @@ impl<'gc, 'a> MovieClip<'gc> {
                     Err(err) => {
                         Avm2::uncaught_error(
                             &mut activation,
-                            Some(self.into()),
+                            Some(self.movie()),
                             err,
                             "Error attempting to lookup AVM2 symbol class",
                         );
@@ -4482,7 +4482,7 @@ impl<'gc, 'a> MovieClip<'gc> {
 
                 Avm2::uncaught_error(
                     &mut temp_activation,
-                    Some(self.into()),
+                    Some(self.movie()),
                     err,
                     "Error running AVM2 eager script",
                 );

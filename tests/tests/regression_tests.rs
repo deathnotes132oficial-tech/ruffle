@@ -4,7 +4,7 @@
 
 use crate::environment::NativeEnvironment;
 use crate::external_interface::tests::{external_interface_avm1, external_interface_avm2};
-use crate::logs::loader_cancellations_are_not_errors;
+use crate::logs::{cancelled_uncaught_errors_are_logged, loader_cancellations_are_not_errors};
 use crate::movie_library::{
     loader_unload_releases_library, released_class_frees_library,
     requested_gc_is_postponed_not_dropped, retained_class_keeps_library,
@@ -124,6 +124,12 @@ fn main() {
     runner.with_additional_test(Trial::test(
         "loader_cancellations_are_not_errors",
         move || loader_cancellations_are_not_errors(&*env_clone),
+    ));
+
+    let env_clone = env.clone();
+    runner.with_additional_test(Trial::test(
+        "cancelled_uncaught_errors_are_logged",
+        move || cancelled_uncaught_errors_are_logged(&*env_clone),
     ));
 
     let env_clone = env.clone();

@@ -62,6 +62,12 @@ pub struct LoaderInfoObject<'gc>(pub Gc<'gc, LoaderInfoObjectData<'gc>>);
 #[collect(no_drop)]
 pub struct LoaderInfoObjectWeak<'gc>(pub GcWeak<'gc, LoaderInfoObjectData<'gc>>);
 
+impl<'gc> LoaderInfoObjectWeak<'gc> {
+    pub fn upgrade(self, mc: &Mutation<'gc>) -> Option<LoaderInfoObject<'gc>> {
+        self.0.upgrade(mc).map(LoaderInfoObject)
+    }
+}
+
 impl fmt::Debug for LoaderInfoObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LoaderInfoObject")
@@ -81,6 +87,8 @@ pub struct LoaderInfoObjectData<'gc> {
     loaded_stream: Lock<LoaderStream<'gc>>,
 
     loader: Option<StageObject<'gc>>,
+
+    creator: Option<LoaderInfoObject<'gc>>,
 
     /// Whether or not we've fired our 'init' event
     init_event_fired: Cell<bool>,
@@ -111,6 +119,7 @@ impl<'gc> LoaderInfoObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         movie: SwfMovie<'gc>,
         loader: Option<StageObject<'gc>>,
+        creator: Option<LoaderInfoObject<'gc>>,
         root_clip: Option<DisplayObject<'gc>>,
         is_stage: bool,
     ) -> Result<Self, Error<'gc>> {
@@ -123,6 +132,7 @@ impl<'gc> LoaderInfoObject<'gc> {
                 base,
                 loaded_stream: Lock::new(LoaderStream::NotYetLoaded(movie, root_clip, is_stage)),
                 loader,
+                creator,
                 init_event_fired: Cell::new(false),
                 complete_event_fired: Cell::new(false),
                 shared_events: activation
@@ -150,8 +160,26 @@ impl<'gc> LoaderInfoObject<'gc> {
         Ok(object)
     }
 
+    /// The `LoaderInfo` of `movie`'s code: the one its `Loader` loaded it
+    /// into, or the root's for the root movie and for code whose `LoaderInfo`
+    /// is gone.
+    pub fn of_movie(context: &UpdateContext<'gc>, movie: SwfMovie<'gc>) -> Option<Self> {
+        context
+            .library
+            .loader_info(context.gc(), movie)
+            .or_else(|| context.stage.root_clip()?.loader_info())
+    }
+
+    pub fn downgrade(self) -> LoaderInfoObjectWeak<'gc> {
+        LoaderInfoObjectWeak(Gc::downgrade(self.0))
+    }
+
     pub fn loader(self) -> Option<StageObject<'gc>> {
         self.0.loader
+    }
+
+    pub fn creator(self) -> Option<LoaderInfoObject<'gc>> {
+        self.0.creator
     }
 
     pub fn shared_events(self) -> Object<'gc> {

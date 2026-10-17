@@ -1,0 +1,4 @@
+holder unloaded, nested still in root
+throwing child error
+root caught
+root errors caught 1
