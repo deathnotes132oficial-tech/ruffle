@@ -11,11 +11,16 @@ use std::rc::Rc;
 thread_local! {
     /// Quantas salas descarregadas ja foram encerradas de verdade.
     static ENCERRADOS: Cell<u64> = const { Cell::new(0) };
+    /// Quantos orfaos venceram o prazo e deixaram de receber quadros.
+    static ESQUECIDOS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Quantos conteudos descarregados ja foram encerrados.
-pub fn contagem_de_encerrados() -> u64 {
-    ENCERRADOS.with(|c| c.get())
+pub fn contagem_de_encerrados() -> (u64, u64) {
+    (
+        ENCERRADOS.with(|c| c.get()),
+        ESQUECIDOS.with(|c| c.get()),
+    )
 }
 
 /// The list of 'orphan' objects - these objects have no parent,
@@ -30,7 +35,11 @@ pub fn contagem_de_encerrados() -> u64 {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct OrphanManager<'gc> {
-    orphans: Rc<Vec<DisplayObjectWeak<'gc>>>,
+    /// Cada orfao, com o instante em que ficou orfao.
+    ///
+    /// O instante existe por causa do prazo la embaixo: sem ele nao da pra
+    /// saber ha quanto tempo o clipe esta fora da tela.
+    orphans: Rc<Vec<(DisplayObjectWeak<'gc>, u64)>>,
 
     /// A FILA DE DESCARTE ADIADO.
     ///
@@ -52,8 +61,26 @@ pub struct OrphanManager<'gc> {
 /// Quantos quadros esperar antes de encerrar o que foi descarregado.
 const ESPERA_DO_DESCARTE: u8 = 5;
 
+/// Quantos segundos fora da tela antes de um orfao parar de receber quadros.
+///
+/// POR QUE ISTO PRECISA EXISTIR. O Flash deixa o orfao rodando de proposito, e
+/// o Ruffle copia esse comportamento — a diferenca e que no Flash o coletor
+/// acaba levando o clipe embora, e aqui ele nunca leva, porque o filme esta
+/// preso num ciclo de referencias. Entao "roda ate ser coletado" virou "roda
+/// pra sempre": medimos 4.607 orfaos vivos numa sessao, todos executando
+/// ActionScript a cada quadro. Sao eles que fabricam os milhoes de strings e
+/// de nos de XML.
+///
+/// O prazo faz o papel que o coletor deveria fazer. E generoso de proposito: o
+/// jogo pode guardar um clipe fora da tela e devolve-lo depois, e meio minuto
+/// e muito mais do que qualquer troca de tela leva.
+///
+/// E ele so tira os QUADROS, nao destroi nada. Se o jogo devolver o clipe pra
+/// arvore, ele volta a rodar normalmente por ela.
+const PRAZO_DO_ORFAO: u64 = 30;
+
 impl<'gc> OrphanManager<'gc> {
-    fn orphans_mut(&mut self) -> &mut Vec<DisplayObjectWeak<'gc>> {
+    fn orphans_mut(&mut self) -> &mut Vec<(DisplayObjectWeak<'gc>, u64)> {
         Rc::make_mut(&mut self.orphans)
     }
 
@@ -70,7 +97,7 @@ impl<'gc> OrphanManager<'gc> {
     /// Tira um objeto da lista de orfaos — ele para de receber quadros.
     pub fn remover_orfao(&mut self, dobj: DisplayObject<'gc>) {
         self.orphans_mut()
-            .retain(|d| !std::ptr::eq(d.as_ptr(), dobj.as_ptr()));
+            .retain(|(d, _)| !std::ptr::eq(d.as_ptr(), dobj.as_ptr()));
     }
 
     /// Encerra o que ja esperou tempo suficiente.
@@ -135,9 +162,10 @@ impl<'gc> OrphanManager<'gc> {
         if self
             .orphans
             .iter()
-            .all(|d| !std::ptr::eq(d.as_ptr(), dobj.as_ptr()))
+            .all(|(d, _)| !std::ptr::eq(d.as_ptr(), dobj.as_ptr()))
         {
-            self.orphans_mut().push(dobj.downgrade());
+            let agora = crate::character::agora();
+            self.orphans_mut().push((dobj.downgrade(), agora));
         }
     }
 
@@ -157,7 +185,7 @@ impl<'gc> OrphanManager<'gc> {
         let vivos = self
             .orphans
             .iter()
-            .filter(|d| valid_orphan(**d, mc).is_some())
+            .filter(|(d, _)| valid_orphan(*d, mc).is_some())
             .count();
         (total, vivos)
     }
@@ -172,7 +200,7 @@ impl<'gc> OrphanManager<'gc> {
         // the iteration in this method.
         let orphan_objs: Rc<_> = context.orphan_manager.orphans.clone();
 
-        for orphan in orphan_objs.iter() {
+        for (orphan, _) in orphan_objs.iter() {
             if let Some(dobj) = valid_orphan(*orphan, context.gc()) {
                 f(dobj, context);
             }
@@ -183,8 +211,18 @@ impl<'gc> OrphanManager<'gc> {
     /// that have been garbage collected, or are no longer orphans
     /// (they've since acquired a parent).
     pub fn cleanup_dead_orphans(&mut self, mc: &Mutation<'gc>) {
-        self.orphans_mut().retain(|d| {
+        let agora = crate::character::agora();
+
+        self.orphans_mut().retain(|(d, desde)| {
             if let Some(dobj) = valid_orphan(*d, mc) {
+                // VENCEU O PRAZO: sai da lista e para de receber quadros.
+                //
+                // Ver `PRAZO_DO_ORFAO`. Nada e destruido — se o jogo devolver
+                // o clipe pra arvore, ele volta a rodar por ela.
+                if agora.saturating_sub(*desde) >= PRAZO_DO_ORFAO {
+                    ESQUECIDOS.with(|c| c.set(c.get() + 1));
+                    return false;
+                }
                 // All clips that become orphaned (have their parent removed, or start out with no parent)
                 // get added to the orphan list. However, there's a distinction between clips
                 // that are removed from a RemoveObject tag, and clips that are removed from ActionScript.

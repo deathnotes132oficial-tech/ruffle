@@ -1245,12 +1245,12 @@ impl Player {
                 context.library.presos_por_script();
             let (texturas, bytes_texturas) = context.library.texturas();
             let (orfaos, orfaos_vivos) = context.orphan_manager.quantos(context.gc());
-            let encerrados = crate::orphan_manager::contagem_de_encerrados();
+            let (encerrados, esquecidos) = crate::orphan_manager::contagem_de_encerrados();
 
             let mb = |bytes: usize| bytes / (1024 * 1024);
 
             format!(
-                "{swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregamentos} sem-clipe {sem_clipe} pendentes {pendentes} | presos {presos} ({} MB) livres {livres} ({} MB) | texturas {texturas} ({} MB) | orfaos {orfaos} vivos {orfaos_vivos} encerrados {encerrados}",
+                "{swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregamentos} sem-clipe {sem_clipe} pendentes {pendentes} | presos {presos} ({} MB) livres {livres} ({} MB) | texturas {texturas} ({} MB) | orfaos {orfaos} vivos {orfaos_vivos} encerrados {encerrados} esquecidos {esquecidos}",
                 mb(bytes_presos),
                 mb(bytes_livres),
                 mb(bytes_texturas),
