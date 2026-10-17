@@ -3,7 +3,18 @@
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, DisplayObjectWeak, TDisplayObject};
 use gc_arena::{Collect, Mutation};
+use std::cell::Cell;
 use std::rc::Rc;
+
+thread_local! {
+    /// Quantas salas descarregadas ja foram encerradas de verdade.
+    static ENCERRADOS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Quantos conteudos descarregados ja foram encerrados.
+pub fn contagem_de_encerrados() -> u64 {
+    ENCERRADOS.with(|c| c.get())
+}
 
 /// The list of 'orphan' objects - these objects have no parent,
 /// so we need to manually run their frames in `run_all_phases_avm2` to match
@@ -18,11 +29,97 @@ use std::rc::Rc;
 #[collect(no_drop)]
 pub struct OrphanManager<'gc> {
     orphans: Rc<Vec<DisplayObjectWeak<'gc>>>,
+
+    /// A FILA DE DESCARTE ADIADO.
+    ///
+    /// O jogo chama `Loader.unload()` ao sair de uma sala. No Flash de
+    /// verdade isso NAO encerra o conteudo — so tira a referencia, e a sala
+    /// segue rodando ENTER_FRAME, temporizador e som ate o coletor leva-la.
+    /// Aqui o coletor nunca leva: o filme fica preso num ciclo de
+    /// referencias, entao a sala roda pra sempre. Tres salas criadas viram
+    /// tres salas rodando ao mesmo tempo.
+    ///
+    /// POR QUE ADIADO E NAO NA HORA: encerrar dentro do mesmo quadro quebra,
+    /// porque ainda ha referencias vivas em uso naquele instante. Foi o que
+    /// derrubou a tentativa anterior de soltar no `Loader.unload()`. Esperar
+    /// alguns quadros resolve, e foi assim que resolveram no unico caso
+    /// publico de jogo grande rodando por Ruffle em navegador de celular.
+    descarte: Rc<Vec<(DisplayObjectWeak<'gc>, u8)>>,
 }
+
+/// Quantos quadros esperar antes de encerrar o que foi descarregado.
+const ESPERA_DO_DESCARTE: u8 = 5;
 
 impl<'gc> OrphanManager<'gc> {
     fn orphans_mut(&mut self) -> &mut Vec<DisplayObjectWeak<'gc>> {
         Rc::make_mut(&mut self.orphans)
+    }
+
+    fn descarte_mut(&mut self) -> &mut Vec<(DisplayObjectWeak<'gc>, u8)> {
+        Rc::make_mut(&mut self.descarte)
+    }
+
+    /// Marca um conteudo descarregado pra ser encerrado daqui a alguns quadros.
+    pub fn agendar_descarte(&mut self, dobj: DisplayObject<'gc>) {
+        self.descarte_mut()
+            .push((dobj.downgrade(), ESPERA_DO_DESCARTE));
+    }
+
+    /// Tira um objeto da lista de orfaos — ele para de receber quadros.
+    pub fn remover_orfao(&mut self, dobj: DisplayObject<'gc>) {
+        self.orphans_mut()
+            .retain(|d| !std::ptr::eq(d.as_ptr(), dobj.as_ptr()));
+    }
+
+    /// Encerra o que ja esperou tempo suficiente.
+    ///
+    /// Chamado uma vez por quadro. Quem ainda nao venceu o prazo so tem o
+    /// contador decrementado; quem venceu tem a linha do tempo parada, os
+    /// filhos parados junto, e sai da lista de orfaos — que e o que faz a
+    /// sala deixar de consumir um quadro atras do outro.
+    ///
+    /// Quem morreu sozinho no meio do caminho simplesmente some da fila: o
+    /// coletor fez o trabalho e nao ha o que encerrar.
+    pub fn processar_descarte(context: &mut UpdateContext<'gc>) {
+        if context.orphan_manager.descarte.is_empty() {
+            return;
+        }
+
+        let fila: Rc<_> = context.orphan_manager.descarte.clone();
+        let mut restantes: Vec<(DisplayObjectWeak<'gc>, u8)> = Vec::new();
+        let mut vencidos: Vec<DisplayObject<'gc>> = Vec::new();
+
+        for (fraco, falta) in fila.iter() {
+            if let Some(dobj) = valid_orphan(*fraco, context.gc()) {
+                if *falta == 0 {
+                    vencidos.push(dobj);
+                } else {
+                    restantes.push((*fraco, falta - 1));
+                }
+            }
+        }
+
+        *context.orphan_manager.descarte_mut() = restantes;
+
+        for dobj in vencidos {
+            Self::encerrar(dobj, context);
+            context.orphan_manager.remover_orfao(dobj);
+            ENCERRADOS.with(|c| c.set(c.get() + 1));
+        }
+    }
+
+    /// Para a linha do tempo deste objeto e de tudo que esta dentro dele.
+    fn encerrar(dobj: DisplayObject<'gc>, context: &mut UpdateContext<'gc>) {
+        if let Some(clip) = dobj.as_movie_clip() {
+            clip.stop(context);
+        }
+
+        if let Some(container) = dobj.as_container() {
+            let filhos: Vec<_> = container.iter_render_list().collect();
+            for filho in filhos {
+                Self::encerrar(filho, context);
+            }
+        }
     }
 
     /// Adds a `MovieClip` to the orphan list. In AVM2, movies advance their
@@ -118,6 +215,7 @@ impl<'gc> Default for OrphanManager<'gc> {
     fn default() -> Self {
         Self {
             orphans: Rc::new(Vec::new()),
+            descarte: Rc::new(Vec::new()),
         }
     }
 }

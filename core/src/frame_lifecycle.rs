@@ -109,6 +109,7 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
     // This performs special handling of clips which became orphaned as
     // a result of a RemoveObject tag - see `cleanup_dead_orphans` for details.
     context.orphan_manager.cleanup_dead_orphans(context.gc());
+    OrphanManager::processar_descarte(context);
 
     *context.frame_phase = FramePhase::Idle;
 }
@@ -169,6 +170,7 @@ pub fn run_inner_goto_frame<'gc>(
     // This performs special handling of clips which became orphaned as
     // a result of a RemoveObject tag - see `cleanup_dead_orphans` for details.
     context.orphan_manager.cleanup_dead_orphans(context.gc());
+    OrphanManager::processar_descarte(context);
 
     *context.frame_phase = old_phase;
 }

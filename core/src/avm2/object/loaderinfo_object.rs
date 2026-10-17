@@ -290,6 +290,15 @@ impl<'gc> LoaderInfoObject<'gc> {
         // Remove the Loader's content element if it exists.
         if let Some(child) = content {
             loader.remove_child(context, child);
+
+            // E agenda o encerramento dele.
+            //
+            // Tirar da tela nao para nada: o conteudo vira orfao e segue
+            // rodando os quadros, como no Flash de verdade. La o coletor
+            // acabava levando; aqui ele nao leva, e a sala roda pra sempre.
+            // Ver `OrphanManager::processar_descarte` — e adiado de proposito,
+            // porque encerrar neste mesmo quadro quebra.
+            context.orphan_manager.agendar_descarte(child);
         }
     }
 }
