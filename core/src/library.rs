@@ -4,7 +4,7 @@ use crate::avm2::{
     Class as Avm2Class, ClassWeak as Avm2ClassWeak, Domain as Avm2Domain,
     TranslationUnitWeak as Avm2TranslationUnitWeak,
 };
-use crate::backend::audio::SoundHandle;
+use crate::backend::audio::{AudioBackend, SoundHandle};
 use crate::character::Character;
 use crate::memory_report::LibraryMemoryUsage;
 
@@ -442,6 +442,15 @@ impl<'gc> MovieLibrary<'gc> {
         }
     }
 
+    fn sounds(&self) -> impl Iterator<Item = SoundHandle> + '_ {
+        self.characters
+            .values()
+            .filter_map(|character| match character {
+                Character::Sound(sound) => Some(*sound),
+                _ => None,
+            })
+    }
+
     /// Registers an export name for a given character ID.
     /// This character will then be instantiable from AVM1.
     pub fn register_export(&mut self, id: CharacterId, export_name: AvmString<'gc>) {
@@ -749,16 +758,28 @@ impl<'gc> MovieLibraries<'gc> {
     /// keep, and clears the marks of the ones it did for the next cycle.
     ///
     /// Returns the number of libraries dropped.
-    fn drop_unneeded(&mut self, fc: &Finalization<'gc>) -> usize {
+    fn drop_unneeded(&mut self, fc: &Finalization<'gc>, audio: &mut dyn AudioBackend) -> usize {
         let before = self.0.len();
+        let mut released_sounds = FnvHashSet::default();
         self.0.retain(|_, library| {
             if library.is_pinned() || std::mem::take(&mut library.kept) {
                 library.remove_dead_translation_units(fc);
                 true
             } else {
+                released_sounds.extend(library.sounds());
                 false
             }
         });
+        if !released_sounds.is_empty() {
+            for library in self.0.values() {
+                for sound in library.sounds() {
+                    released_sounds.remove(&sound);
+                }
+            }
+            for sound in released_sounds {
+                audio.unregister_sound(sound);
+            }
+        }
         before - self.0.len()
     }
 
@@ -922,12 +943,16 @@ impl<'gc> Library<'gc> {
     /// Must be called between the end of marking and the start of sweeping,
     /// every cycle: an untraced library whose contents were neither
     /// resurrected nor dropped would be left pointing at swept objects.
-    pub fn resolve_releasable_libraries(&mut self, fc: &Finalization<'gc>) -> bool {
+    pub fn resolve_releasable_libraries(
+        &mut self,
+        fc: &Finalization<'gc>,
+        audio: &mut dyn AudioBackend,
+    ) -> bool {
         if self.movie_libraries.resurrect_needed(fc) {
             return true;
         }
 
-        let dropped = self.movie_libraries.drop_unneeded(fc);
+        let dropped = self.movie_libraries.drop_unneeded(fc, audio);
         if dropped > 0 {
             tracing::debug!("Released {dropped} unreachable movie librar(y/ies)");
         }

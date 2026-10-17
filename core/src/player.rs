@@ -2574,7 +2574,9 @@ impl Player {
                         .data
                         .try_borrow_mut(fc)
                         .expect("Arena root borrowed during garbage collection");
-                    let resume = data.library.resolve_releasable_libraries(fc);
+                    let resume = data
+                        .library
+                        .resolve_releasable_libraries(fc, &mut *self.audio);
                     if !resume {
                         // skua #13: marking is final; drop weak-dictionary entries whose key died.
                         data.avm2.skua_purge_weak_dictionaries(fc);

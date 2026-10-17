@@ -1,12 +1,16 @@
 //! Lifetime tests for the libraries of dynamically loaded movies.
 
 use ruffle_core::Player;
+use ruffle_core::backend::audio::SoundHandle;
 use ruffle_core::memory_report::MemoryReport;
+use ruffle_core::swf::{CharacterId, SoundEvent, SoundInfo};
 use ruffle_test_framework::environment::Environment;
 use ruffle_test_framework::options::TestOptions;
 use ruffle_test_framework::runner::TestStatus;
 use ruffle_test_framework::test::Test;
 use ruffle_test_framework::vfs::{PhysicalFS, VfsPath};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 
 /// The movies the player currently holds a library for, by URL.
@@ -179,6 +183,83 @@ pub fn released_class_frees_library(
     })
 }
 
+fn resident_child_sounds(player: &mut Player) -> Vec<SoundHandle> {
+    player.mutate_with_update_context(|context| {
+        let children: Vec<_> = context
+            .library
+            .known_movies()
+            .filter(|movie| movie.url().ends_with("child.swf"))
+            .collect();
+        children
+            .into_iter()
+            .filter_map(|movie| context.library.library_for_movie(movie))
+            .flat_map(|library| {
+                library
+                    .characters()
+                    .keys()
+                    .filter_map(|id| library.get_sound(*id))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    })
+}
+
+/// A released library takes the sounds it registered with the audio backend
+/// with it.
+pub fn loader_unload_unregisters_sounds(
+    environment: &impl Environment,
+) -> Result<(), libtest_mimic::Failed> {
+    let test = &Test::from_options(
+        TestOptions {
+            num_frames: Some(150),
+            output_path: "output.txt".into(),
+            ..Default::default()
+        },
+        VfsPath::new(PhysicalFS::new(
+            "tests/swfs/avm2/loader_unload_releases_sounds/",
+        )),
+        "loader_unload_releases_sounds".to_string(),
+    )?;
+
+    let mut runner = test.create_test_runner(environment)?;
+    let mut registered = HashSet::new();
+    loop {
+        let status = runner.tick()?;
+        registered.extend(resident_child_sounds(&mut runner.player().lock().unwrap()));
+        match status {
+            TestStatus::Continue => {}
+            TestStatus::Sleep(duration) => sleep(duration),
+            TestStatus::Finished => break,
+        }
+    }
+
+    let mut player = runner.player().lock().unwrap();
+    player.collect_all_garbage();
+    player.collect_all_garbage();
+    let resident = resident_child_sounds(&mut player);
+
+    if registered.len() < 10 {
+        return Err(format!(
+            "expected the ten children to register ten sounds, saw {}",
+            registered.len()
+        )
+        .into());
+    }
+    let leaked = registered
+        .iter()
+        .filter(|sound| !resident.contains(sound))
+        .filter(|sound| player.audio().get_sound_duration(**sound).is_some())
+        .count();
+    if leaked > 0 {
+        return Err(format!(
+            "{leaked} of the {} sounds of released child libraries are still registered",
+            registered.len() - resident.len(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 const FRAMES_BETWEEN_GC_REQUESTS: usize = 3;
 const REQUESTED_GC_WINDOW: usize = 10;
 
@@ -224,6 +305,125 @@ pub fn requested_gc_is_postponed_not_dropped(
         .into());
     }
     Ok(())
+}
+
+const BEEP: CharacterId = 1;
+
+const EVENT_SOUND: SoundInfo = SoundInfo {
+    event: SoundEvent::Event,
+    in_sample: None,
+    out_sample: None,
+    num_loops: 1,
+    envelope: None,
+};
+
+fn sounds_of_released_importers(
+    environment: &impl Environment,
+    options: TestOptions,
+    dir: VfsPath,
+) -> Result<(Arc<Mutex<Player>>, Vec<(&'static str, SoundHandle)>), String> {
+    let test = &Test::from_options(
+        options,
+        dir,
+        "loader_unload_keeps_imported_sounds".to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut runner = test
+        .create_test_runner(environment)
+        .map_err(|error| error.to_string())?;
+    loop {
+        match runner.tick().map_err(|error| error.to_string())? {
+            TestStatus::Continue => {}
+            TestStatus::Sleep(duration) => sleep(duration),
+            TestStatus::Finished => break,
+        }
+    }
+
+    let player = runner.player().clone();
+    let mut locked = player.lock().unwrap();
+    locked.collect_all_garbage();
+    locked.collect_all_garbage();
+    let (released, sounds) = locked.mutate_with_update_context(|context| {
+        let movies: Vec<_> = context.library.known_movies().collect();
+        let resident = |url: &str| movies.iter().find(|movie| movie.url().ends_with(url));
+        let released = ["importer.swf", "exporter.swf"]
+            .into_iter()
+            .all(|url| resident(url).is_none());
+        let sounds: Vec<_> = ["asset.swf", "blank.swf"]
+            .into_iter()
+            .map(|url| {
+                let sound = resident(url)
+                    .and_then(|movie| context.library.library_for_movie(*movie))
+                    .and_then(|library| library.get_sound(BEEP));
+                (url, sound)
+            })
+            .collect();
+        (released, sounds)
+    });
+    drop(locked);
+
+    if !released {
+        return Err("the importers' libraries were not released".into());
+    }
+    let sounds = sounds
+        .into_iter()
+        .map(|(url, sound)| {
+            sound
+                .map(|sound| (url, sound))
+                .ok_or(format!("{url}'s library has no sound"))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((player, sounds))
+}
+
+fn on_mixer_and_null_audio(
+    environment: &impl Environment,
+    check: impl Fn(&mut Player, &str, SoundHandle) -> Result<(), String>,
+) -> Result<(), libtest_mimic::Failed> {
+    let dir = VfsPath::new(PhysicalFS::new(
+        "tests/swfs/avm2/loader_unload_keeps_imported_sounds/",
+    ));
+    let mixer = TestOptions::read(&dir.join("test.toml")?)?;
+    let null = TestOptions {
+        num_frames: mixer.num_frames,
+        output_path: "output.txt".into(),
+        ..Default::default()
+    };
+    for (backend, options) in [("mixer", mixer), ("null", null)] {
+        sounds_of_released_importers(environment, options, dir.clone())
+            .and_then(|(player, sounds)| {
+                let mut player = player.lock().unwrap();
+                sounds
+                    .into_iter()
+                    .try_for_each(|(url, sound)| check(&mut player, url, sound))
+            })
+            .map_err(|error| format!("{backend} audio backend: {error}"))?;
+    }
+    Ok(())
+}
+
+pub fn released_importer_keeps_imported_sound(
+    environment: &impl Environment,
+) -> Result<(), libtest_mimic::Failed> {
+    on_mixer_and_null_audio(environment, |player, url, sound| {
+        player
+            .audio_mut()
+            .start_sound(sound, &EVENT_SOUND)
+            .map(|_| ())
+            .map_err(|error| format!("the sound in {url} no longer starts: {error}"))
+    })
+}
+
+pub fn unregistered_sound_fails_to_start(
+    environment: &impl Environment,
+) -> Result<(), libtest_mimic::Failed> {
+    on_mixer_and_null_audio(environment, |player, _, sound| {
+        player.audio_mut().unregister_sound(sound);
+        match player.audio_mut().start_sound(sound, &EVENT_SOUND) {
+            Ok(_) => Err("a sound that is no longer registered started".into()),
+            Err(_) => Ok(()),
+        }
+    })
 }
 
 pub fn settled_loads_leave_the_load_manager(

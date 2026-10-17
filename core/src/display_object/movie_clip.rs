@@ -3955,8 +3955,12 @@ impl<'gc, 'a> MovieClipShared<'gc> {
     ) -> Result<(), Error> {
         let sound = reader.read_define_sound()?;
         if let Ok(handle) = context.audio.register_sound(&sound) {
-            self.library_mut(context)
-                .register_character(sound.id, Character::Sound(handle));
+            if !self
+                .library_mut(context)
+                .register_character(sound.id, Character::Sound(handle))
+            {
+                context.audio.unregister_sound(handle);
+            }
         } else {
             tracing::error!(
                 "MovieClip::define_sound: Unable to register sound ID {}",

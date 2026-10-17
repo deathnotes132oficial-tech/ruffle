@@ -36,6 +36,9 @@ mod decoders {
     pub enum Error {
         #[error("Too many sounds are playing")]
         TooManySounds,
+
+        #[error("The sound is not registered")]
+        UnregisteredSound,
     }
 }
 
@@ -107,6 +110,9 @@ pub trait AudioBackend: Any {
 
     /// Registers MP3 audio from an external source.
     fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError>;
+
+    /// Forgets a registered sound. Instances of it that are playing carry on.
+    fn unregister_sound(&mut self, sound: SoundHandle);
 
     /// Plays a sound.
     fn start_sound(
@@ -297,15 +303,20 @@ impl AudioBackend for NullAudioBackend {
         }))
     }
 
+    fn unregister_sound(&mut self, sound: SoundHandle) {
+        self.sounds.remove(sound);
+    }
+
     fn start_sound(
         &mut self,
         sound: SoundHandle,
         sound_info: &swf::SoundInfo,
     ) -> Result<SoundInstanceHandle, DecodeError> {
-        let length = self
+        let sound = self
             .sounds
             .get(sound)
-            .map(|s| s.duration)
+            .ok_or(DecodeError::UnregisteredSound)?;
+        let length = Some(sound.duration)
             .filter(|d| *d > FloatDuration::ZERO)
             .map(|d| {
                 Duration::from_secs_f64(
