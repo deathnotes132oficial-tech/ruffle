@@ -1,0 +1,5 @@
+closed in the content's added event, before init
+then [init, complete], content A
+closed in a later enterFrame, before init
+then [init, complete], content A
+done

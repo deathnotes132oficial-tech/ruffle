@@ -7,7 +7,7 @@ use crate::avm2::object::{EventObject, FunctionObject, Object, StageObject, TObj
 use crate::avm2::{Avm2, Error};
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
-use crate::loader::ContentType;
+use crate::loader::{ContentType, LoaderHandle};
 use crate::string::AvmString;
 use crate::tag_utils::{SwfMovie, SwfMovieData};
 use core::fmt;
@@ -192,13 +192,18 @@ impl<'gc> LoaderInfoObject<'gc> {
 
     /// Fires the 'init' and 'complete' events if they haven't been fired yet.
     /// Returns `true` if both events have been fired (either as a result of
-    /// this call, or due to a previous call).
+    /// this call, or due to a previous call), or if a handler cancelled
+    /// `load`, the load these events belong to (`None` for the root movie).
     pub fn fire_init_and_complete_events(
         self,
         context: &mut UpdateContext<'gc>,
+        load: Option<LoaderHandle>,
         status: u16,
         redirected: bool,
     ) -> bool {
+        let cancelled = |context: &UpdateContext<'gc>| {
+            load.is_some_and(|load| context.load_manager.is_cancelled(load))
+        };
         self.0.expose_content.set(true);
         if !self.0.init_event_fired.get() {
             self.0.init_event_fired.set(true);
@@ -207,6 +212,9 @@ impl<'gc> LoaderInfoObject<'gc> {
             // Right now, we fire it when downloading is fully completed.
             let init_evt = EventObject::bare_default_event(context, "init");
             Avm2::dispatch_event(context, init_evt, self.into());
+            if cancelled(context) {
+                return true;
+            }
         }
 
         if !self.0.complete_event_fired.get() {
@@ -229,6 +237,9 @@ impl<'gc> LoaderInfoObject<'gc> {
                         EventObject::http_status_event(&mut activation, status, redirected);
 
                     Avm2::dispatch_event(context, http_status_evt, self.into());
+                    if cancelled(context) {
+                        return true;
+                    }
                 }
 
                 self.0.complete_event_fired.set(true);
@@ -265,7 +276,11 @@ impl<'gc> LoaderInfoObject<'gc> {
         self.0.content_type.set(content_type);
     }
 
+    /// Removes the Loader's content and cancels every load into this
+    /// `LoaderInfo`, whatever stage it has reached.
     pub fn unload(self, context: &mut UpdateContext<'gc>) {
+        context.load_manager.cancel_all_avm2_loads(self);
+
         let mut loader = self
             .0
             .loader
@@ -301,8 +316,8 @@ impl<'gc> LoaderInfoObject<'gc> {
     /// Unloads like [`Self::unload`], first stopping what the content runs,
     /// as Flash documents for `Loader.unloadAndStop`: the timelines, sounds,
     /// and frame and activation listeners of its display objects, and the
-    /// stage listeners and timers that its code started. Every movie that its
-    /// code loaded, at any depth, goes the same way.
+    /// stage listeners, timers and loads that its code started. Every movie
+    /// that its code loaded, at any depth, goes the same way.
     pub fn unload_and_stop(self, context: &mut UpdateContext<'gc>) {
         let stream = self.loader_stream();
         let content = match stream {
@@ -330,6 +345,7 @@ impl<'gc> LoaderInfoObject<'gc> {
 
             let movies: Vec<_> = std::iter::once(stream.movie()).chain(loaded).collect();
             debug_assert!(!movies.contains(context.root_swf));
+            context.load_manager.cancel_loads_started_by(&movies);
             context.stop_sounds_started_by(&movies);
             let mc = context.gc();
             context.timers.remove_owned_by(mc, &movies);

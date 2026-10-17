@@ -1,0 +1,14 @@
+load, then unloadAndStop(true) in the same turn:
+  events after unloading: [], content null
+close() and unloadAndStop(true) once the content is in, before init:
+  content inserted, init not fired
+  events after unloading: [], content null
+unloadAndStop() in an image's init:
+  events after unloading: [], content null
+unloadAndStop(true) in the init of a child whose own load is still pending:
+  events after unloading: [], content null
+unloadAndStop(true) in the init of a load that the child started:
+  events after unloading: [], content null
+unloadAndStop(true) in the httpStatus of a load that the child started:
+  events after unloading: [], content null
+done

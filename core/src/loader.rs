@@ -39,7 +39,7 @@ use crate::tag_utils::{SwfMovie, SwfMovieData};
 use crate::vminterface::Instantiator;
 use chardetng::EncodingDetector;
 use encoding_rs::{UTF_8, WINDOWS_1252};
-use gc_arena::Collect;
+use gc_arena::{Collect, Gc};
 use indexmap::IndexMap;
 use ruffle_common::tag_utils::LoadBytesInfo;
 use ruffle_macros::istr;
@@ -210,6 +210,13 @@ pub enum Error {
     ParseIntError(#[from] std::num::ParseIntError),
 }
 
+fn ok_if_cancelled(result: Result<(), Error>) -> Result<(), Error> {
+    match result {
+        Err(Error::Cancelled) => Ok(()),
+        result => result,
+    }
+}
+
 impl From<crate::avm1::Error<'_>> for Error {
     fn from(error: crate::avm1::Error<'_>) -> Self {
         Error::Avm1Error(error.to_string())
@@ -271,6 +278,39 @@ impl<'gc> LoadManager<'gc> {
         self.0.get_mut(handle)
     }
 
+    /// Whether the load has left the manager, because it settled or was cancelled.
+    pub fn is_cancelled(&self, handle: LoaderHandle) -> bool {
+        !self.0.contains_key(handle)
+    }
+
+    fn fail_if_cancelled(&self, handle: LoaderHandle) -> Result<(), Error> {
+        if self.is_cancelled(handle) {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn cancel_all_avm2_loads(&mut self, loader_info: LoaderInfoObject<'gc>) {
+        self.0
+            .retain(|_, loader| !loader.is_avm2_load_into(loader_info));
+    }
+
+    pub fn cancel_loads_started_by(&mut self, movies: &[SwfMovie<'gc>]) {
+        self.0
+            .retain(|_, loader| !movies.contains(&loader.started_by));
+    }
+
+    pub fn cancel_unfinished_avm2_loads(&mut self, loader_info: LoaderInfoObject<'gc>) {
+        self.0.retain(|_, loader| {
+            !(loader.is_avm2_load_into(loader_info)
+                && matches!(
+                    loader.loader_status,
+                    LoaderStatus::Pending | LoaderStatus::Parsing
+                ))
+        });
+    }
+
     /// Checks if the target clip on the given handle's loader
     /// has been `avm1_removed()`. If so, it will set the `loader_status`
     /// to `Failed` and return `true`.
@@ -328,7 +368,8 @@ impl<'gc> LoadManager<'gc> {
 
         let handle = self.add_loader(MovieLoader::new(target_clip, vm_data));
         let loader = self.get_loader_mut(handle).unwrap();
-        loader.movie_loader(player, request, loader_url)
+        let future = loader.movie_loader(player, request, loader_url);
+        Box::pin(async move { ok_if_cancelled(future.await) })
     }
 
     pub fn load_asset_movie(
@@ -419,7 +460,9 @@ impl<'gc> LoadManager<'gc> {
         let handle = context
             .load_manager
             .add_loader(MovieLoader::new(target_clip, vm_data));
-        MovieLoader::movie_loader_bytes(handle, context, loader_url, bytes)
+        ok_if_cancelled(MovieLoader::movie_loader_bytes(
+            handle, context, loader_url, bytes,
+        ))
     }
 
     /// Fires the `onLoad` listener event for every MovieClip that has been
@@ -469,6 +512,7 @@ impl<'gc> LoadManager<'gc> {
             if matches!(status, Some(LoaderStatus::Parsing)) {
                 match MovieLoader::preload_tick(handle, context, limit, 0, false) {
                     Ok(f) => did_finish = did_finish && f,
+                    Err(Error::Cancelled) => {}
                     Err(e) => tracing::error!("Error encountered while preloading movie: {}", e),
                 }
             }
@@ -485,13 +529,13 @@ impl<'gc> LoadManager<'gc> {
             .child_by_index(0)
             .and_then(|o| o.as_movie_clip())
         {
-            movie.try_fire_loaderinfo_events(context);
+            movie.try_fire_loaderinfo_events(context, None);
         }
         let handles: Vec<_> = context.load_manager.0.iter().map(|(h, _)| h).collect();
         for handle in handles {
             if let Some(MovieLoader { target_clip, .. }) = context.load_manager.get_loader(handle)
                 && let Some(movie) = target_clip.as_movie_clip()
-                && movie.try_fire_loaderinfo_events(context)
+                && movie.try_fire_loaderinfo_events(context, Some(handle))
             {
                 context.load_manager.remove_loader(handle)
             }
@@ -1634,6 +1678,13 @@ pub fn load_netstream<'gc>(
 }
 
 impl<'gc> MovieLoader<'gc> {
+    fn is_avm2_load_into(&self, loader_info: LoaderInfoObject<'gc>) -> bool {
+        matches!(
+            self.vm_data,
+            MovieLoaderVMData::Avm2 { loader_info: other, .. } if Gc::ptr_eq(other.0, loader_info.0)
+        )
+    }
+
     /// Report a movie loader start event to script code.
     fn movie_loader_start(handle: LoaderHandle, uc: &mut UpdateContext<'gc>) -> Result<(), Error> {
         let (clip, vm_data) = match uc.load_manager.get_loader(handle) {
@@ -1668,7 +1719,7 @@ impl<'gc> MovieLoader<'gc> {
             }
         }
 
-        Ok(())
+        uc.load_manager.fail_if_cancelled(handle)
     }
 
     /// Load data into a movie loader.
@@ -1870,9 +1921,13 @@ impl<'gc> MovieLoader<'gc> {
                         )?;
                         uc.post_frame_callbacks.push(PostFrameCallback {
                             callback: Box::new(move |uc, dobj: DisplayObject<'_>| {
-                                if let Err(e) =
-                                    MovieLoader::movie_loader_complete(handle, uc, Some(dobj), 0, false)
-                                {
+                                if let Err(e) = ok_if_cancelled(MovieLoader::movie_loader_complete(
+                                    handle,
+                                    uc,
+                                    Some(dobj),
+                                    0,
+                                    false,
+                                )) {
                                     tracing::error!("Error finishing loading of Loader.loadBytes movie {dobj:?}: {e:?}");
                                 }
                             }),
@@ -1968,13 +2023,13 @@ impl<'gc> MovieLoader<'gc> {
                         callback: Box::new(move |uc, bitmap_obj| {
                             uc.post_frame_callbacks.push(PostFrameCallback {
                                 callback: Box::new(move |uc, bitmap_obj| {
-                                    if let Err(e) = MovieLoader::movie_loader_complete(
+                                    if let Err(e) = ok_if_cancelled(MovieLoader::movie_loader_complete(
                                         handle,
                                         uc,
                                         Some(bitmap_obj),
                                         status,
                                         redirected,
-                                    ) {
+                                    )) {
                                         tracing::error!("Error finishing loading of Loader.loadBytes image {bitmap_obj:?}: {e:?}");
                                     }
                                 }),
@@ -2092,7 +2147,7 @@ impl<'gc> MovieLoader<'gc> {
             }
         }
 
-        Ok(())
+        uc.load_manager.fail_if_cancelled(handle)
     }
 
     /// Report a movie loader completion to script code.
@@ -2103,13 +2158,17 @@ impl<'gc> MovieLoader<'gc> {
         status: u16,
         redirected: bool,
     ) -> Result<(), Error> {
-        let (target_clip, vm_data, movie) = match uc.load_manager.get_loader(handle) {
+        let (target_clip, vm_data, movie) = match uc.load_manager.get_loader_mut(handle) {
             Some(Self {
                 target_clip,
                 movie,
                 vm_data,
+                loader_status,
                 ..
-            }) => (*target_clip, *vm_data, *movie),
+            }) => {
+                *loader_status = LoaderStatus::Succeeded;
+                (*target_clip, *vm_data, *movie)
+            }
             None => return Err(Error::Cancelled),
         };
 
@@ -2162,6 +2221,8 @@ impl<'gc> MovieLoader<'gc> {
                     );
                 }
             }
+
+            uc.load_manager.fail_if_cancelled(handle)?;
         }
 
         if let MovieLoaderVMData::Avm2 { loader_info, .. } = vm_data {
@@ -2207,6 +2268,8 @@ impl<'gc> MovieLoader<'gc> {
                 if !movie.unwrap().is_action_script_3() {
                     loader.insert_child_into_depth_list(uc, LOADER_INSERTED_AVM1_DEPTH, dobj);
                 }
+
+                uc.load_manager.fail_if_cancelled(handle)?;
             }
         } else if let Some(dobj) = dobj {
             // This is a load of an image into AVM1 - add it as a child of the target clip.
@@ -2261,16 +2324,20 @@ impl<'gc> MovieLoader<'gc> {
 
                 if let Some(dobj) = dobj
                     && dobj.as_movie_clip().is_none()
+                    && loader_info.fire_init_and_complete_events(
+                        uc,
+                        Some(handle),
+                        status,
+                        redirected,
+                    )
                 {
-                    loader_info.fire_init_and_complete_events(uc, status, redirected);
+                    uc.load_manager.remove_loader(handle);
+                    return Ok(());
                 }
             }
         }
 
-        let loader = uc.load_manager.get_loader_mut(handle).unwrap();
-        loader.loader_status = LoaderStatus::Succeeded;
-
-        Ok(())
+        uc.load_manager.fail_if_cancelled(handle)
     }
 
     /// Report a movie loader error to script code.
@@ -2332,6 +2399,9 @@ impl<'gc> MovieLoader<'gc> {
                     Avm2EventObject::http_status_event(&mut activation, status, redirected);
 
                 Avm2::dispatch_event(activation.context, http_status_evt, loader_info.into());
+                uc.load_manager.fail_if_cancelled(handle)?;
+
+                let mut activation = Avm2Activation::from_nothing(uc);
 
                 // FIXME - Match the exact error message and code generated by Flash
                 let io_error_evt = Avm2EventObject::io_error_event(&mut activation, msg, 0);
@@ -2340,7 +2410,9 @@ impl<'gc> MovieLoader<'gc> {
             }
         }
 
-        let loader = uc.load_manager.get_loader_mut(handle).unwrap();
+        let Some(loader) = uc.load_manager.get_loader_mut(handle) else {
+            return Err(Error::Cancelled);
+        };
         loader.loader_status = LoaderStatus::Failed;
 
         Ok(())

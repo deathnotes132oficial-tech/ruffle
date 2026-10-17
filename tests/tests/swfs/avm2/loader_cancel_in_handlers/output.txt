@@ -1,0 +1,55 @@
+load in init of swf: then [init, httpStatus, complete], content B
+loadBytes in init of swf: then [init, complete], content B
+close in init of swf: then [httpStatus, complete], content A
+load in complete of swf: then [init, httpStatus, complete], content B
+loadBytes in complete of swf: then [init, complete], content B
+close in complete of swf: then [], content A
+load in progress of swf: then [init, httpStatus, complete], content B
+loadBytes in progress of swf: then [init, complete], content B
+close in progress of swf: then [], content null
+load in init of image: then [init, httpStatus, complete], content flash.display::Bitmap
+loadBytes in init of image: then [init, complete], content flash.display::Bitmap
+close in init of image: then [httpStatus, complete], content flash.display::Bitmap
+load in complete of image: then [init, httpStatus, complete], content flash.display::Bitmap
+loadBytes in complete of image: then [init, complete], content flash.display::Bitmap
+close in complete of image: then [], content flash.display::Bitmap
+load in progress of image: then [init, httpStatus, complete], content flash.display::Bitmap
+loadBytes in progress of image: then [init, complete], content flash.display::Bitmap
+close in progress of image: then [], content null
+load in init of swf bytes: then [init, httpStatus, complete], content B
+loadBytes in init of swf bytes: then [init, complete], content B
+close in init of swf bytes: then [complete], content A
+load in complete of swf bytes: then [init, httpStatus, complete], content B
+loadBytes in complete of swf bytes: then [init, complete], content B
+close in complete of swf bytes: then [], content A
+load in progress of swf bytes: then [init, httpStatus, complete], content B
+loadBytes in progress of swf bytes: then [init, complete], content B
+close in progress of swf bytes: then [], content null
+load in init of image bytes: then [init, httpStatus, complete], content flash.display::Bitmap
+loadBytes in init of image bytes: then [init, complete], content flash.display::Bitmap
+close in init of image bytes: then [complete], content flash.display::Bitmap
+load in complete of image bytes: then [init, httpStatus, complete], content flash.display::Bitmap
+loadBytes in complete of image bytes: then [init, complete], content flash.display::Bitmap
+close in complete of image bytes: then [], content flash.display::Bitmap
+load in progress of image bytes: then [init, httpStatus, complete], content flash.display::Bitmap
+loadBytes in progress of image bytes: then [init, complete], content flash.display::Bitmap
+close in progress of image bytes: then [], content null
+load in httpStatus of swf: then [init, httpStatus, complete], content B
+loadBytes in httpStatus of swf: then [init, complete], content B
+close in httpStatus of swf: then [complete], content A
+load in httpStatus of image: then [init, httpStatus, complete], content flash.display::Bitmap
+loadBytes in httpStatus of image: then [init, complete], content flash.display::Bitmap
+close in httpStatus of image: then [complete], content flash.display::Bitmap
+load in httpStatus of missing: then [init, httpStatus, complete], content B
+loadBytes in httpStatus of missing: then [init, complete], content B
+close in httpStatus of missing: then [], content null
+load in httpStatus of unknown: then [init, httpStatus, complete], content B
+loadBytes in httpStatus of unknown: then [init, complete], content B
+close in httpStatus of unknown: then [], content null
+load in ioError of missing: then [init, httpStatus, complete], content B
+loadBytes in ioError of missing: then [init, complete], content B
+close in ioError of missing: then [], content null
+load in ioError of unknown: then [init, httpStatus, complete], content B
+loadBytes in ioError of unknown: then [init, complete], content B
+close in ioError of unknown: then [], content null
+done

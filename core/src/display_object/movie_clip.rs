@@ -32,8 +32,8 @@ use crate::font::{Font, FontType};
 use crate::frame_lifecycle::{FramePhase, run_inner_goto_frame};
 use crate::library::MovieLibrary;
 use crate::limits::ExecutionLimit;
-use crate::loader::LoadManager;
 use crate::loader::{self, ContentType};
+use crate::loader::{LoadManager, LoaderHandle};
 use crate::prelude::*;
 use crate::streams::NetStream;
 use crate::string::{AvmString, SwfStrExt as _, WStr, WString};
@@ -465,12 +465,16 @@ impl<'gc> MovieClip<'gc> {
 
     /// Tries to fire events from our `LoaderInfo` object if we're ready - returns
     /// `true` if both `init` and `complete` have been fired
-    pub fn try_fire_loaderinfo_events(self, context: &mut UpdateContext<'gc>) -> bool {
+    pub fn try_fire_loaderinfo_events(
+        self,
+        context: &mut UpdateContext<'gc>,
+        load: Option<LoaderHandle>,
+    ) -> bool {
         if self.0.initialized()
             && !self.avm2_constructor_failed()
             && let Some(loader_info) = self.loader_info()
         {
-            return loader_info.fire_init_and_complete_events(context, 0, false);
+            return loader_info.fire_init_and_complete_events(context, load, 0, false);
         }
         false
     }

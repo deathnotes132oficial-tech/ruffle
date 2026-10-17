@@ -1,0 +1,13 @@
+load a, then load b
+B constructed
+complete: B
+load a, then close
+content after close: null
+loadBytes a, then loadBytes b
+B constructed
+complete: B
+load a, then loadBytes b
+B constructed
+complete: B
+close with nothing loading
+content: B

@@ -226,6 +226,35 @@ pub fn requested_gc_is_postponed_not_dropped(
     Ok(())
 }
 
+pub fn settled_loads_leave_the_load_manager(
+    environment: &impl Environment,
+) -> Result<(), libtest_mimic::Failed> {
+    let dir = VfsPath::new(PhysicalFS::new(
+        "tests/swfs/avm2/loader_cancel_in_handlers/",
+    ));
+    let options = TestOptions::read(&dir.join("test.toml")?)?;
+    let test = &Test::from_options(options, dir, "loader_cancel_in_handlers".to_string())?;
+
+    let mut runner = test.create_test_runner(environment)?;
+    loop {
+        match runner.tick()? {
+            TestStatus::Continue => {}
+            TestStatus::Sleep(duration) => sleep(duration),
+            TestStatus::Finished => break,
+        }
+    }
+
+    let pending = runner
+        .player()
+        .lock()
+        .unwrap()
+        .mutate_with_update_context(|context| MemoryReport::capture(context).pending_loaders);
+    if pending > 0 {
+        return Err(format!("{pending} settled loads are still registered").into());
+    }
+    Ok(())
+}
+
 fn leaves_nothing_behind(
     environment: &impl Environment,
     name: &str,
@@ -259,6 +288,18 @@ fn leaves_nothing_behind(
         return Err(format!("unloaded movies are still resident: {unloaded:?}").into());
     }
     Ok(())
+}
+
+pub fn unloading_cancels_loads(
+    environment: &impl Environment,
+) -> Result<(), libtest_mimic::Failed> {
+    leaves_nothing_behind(environment, "loader_unload_cancels_loads")
+}
+
+pub fn unloading_drops_queued_sounds(
+    environment: &impl Environment,
+) -> Result<(), libtest_mimic::Failed> {
+    leaves_nothing_behind(environment, "loader_unload_and_stop_queued_sounds")
 }
 
 pub fn unloading_itself_releases_library(
