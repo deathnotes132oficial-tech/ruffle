@@ -18,21 +18,24 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 thread_local! {
-    /// Quantas vtables apontaram para a tabela do pai em vez de copiar.
-    static COMPARTILHADAS: Cell<u64> = const { Cell::new(0) };
-    /// Quantas tiveram mesmo que montar a propria.
-    static COPIADAS: Cell<u64> = const { Cell::new(0) };
+    /// Quantas vtables foram montadas desde que a pagina abriu.
+    static MONTADAS: Cell<u64> = const { Cell::new(0) };
+    /// Quantas entradas de tabela NAO foram copiadas por causa da cadeia.
+    static ENTRADAS_POUPADAS: Cell<u64> = const { Cell::new(0) };
+    /// Quantas entradas proprias as vtables guardam somadas — o que sobrou.
+    static ENTRADAS_PROPRIAS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Devolve (compartilhadas, copiadas) desde que a pagina abriu.
+/// Devolve (vtables montadas, entradas poupadas, entradas proprias).
 ///
-/// E o numero que julga o conserto: se "compartilhadas" for uma fatia grande
-/// do total, as classes vazias dos simbolos pararam de duplicar a tabela do
-/// MovieClip. Se for perto de zero, a aposta estava errada.
-pub fn contagem_de_vtables() -> (u64, u64) {
+/// Antes, cada vtable copiava todas as entradas dos ancestrais. "Poupadas" e
+/// quanto disso deixou de ser copiado; "proprias" e o que de fato ficou
+/// guardado. A razao entre os dois e o tamanho do conserto.
+pub fn contagem_de_vtables() -> (u64, u64, u64) {
     (
-        COMPARTILHADAS.with(|c| c.get()),
-        COPIADAS.with(|c| c.get()),
+        MONTADAS.with(|c| c.get()),
+        ENTRADAS_POUPADAS.with(|c| c.get()),
+        ENTRADAS_PROPRIAS.with(|c| c.get()),
     )
 }
 
@@ -62,7 +65,27 @@ struct VTableData<'gc> {
     /// Como ela nunca e alterada depois de montada (so `get` e `iter`), a
     /// subclasse que nao acrescenta nada pode simplesmente APONTAR para a
     /// tabela do pai em vez de copia-la. Por isso o `Gc`.
-    resolved_traits: Gc<'gc, PropertyMap<'gc, Property>>,
+    /// APENAS o que esta classe declara, mais o que ela sobrescreve.
+    ///
+    /// Antes aqui morava a tabela ACHATADA: as propriedades da classe e as de
+    /// todos os ancestrais, numa copia so dela. Para qualquer descendente de
+    /// MovieClip sao ~167 entradas, ~8 KB — e cada SWF carregado remontava
+    /// tudo de novo. Medido no DDTank: 87.427 vtables montadas numa sessao,
+    /// para 2.653 classes, e nenhuma morre.
+    ///
+    /// Agora cada uma guarda so o que e dela e aponta pro pai em `pai`. A
+    /// busca que nao acha aqui continua la em cima. A heranca do DDTank e
+    /// rasa, entao a cadeia tem poucos degraus e procurar nela custa pouco.
+    traits_proprios: PropertyMap<'gc, Property>,
+
+    /// A vtable da superclasse, onde a busca continua.
+    pai: Option<VTable<'gc>>,
+
+    /// Quantas entradas existem na cadeia inteira, daqui ate a raiz.
+    ///
+    /// Guardado porque somar andando a cadeia seria refazer a conta toda vez,
+    /// e ela e usada pra medir o conserto a cada vtable nova.
+    total_na_cadeia: usize,
 
     /// Use hashmaps for the metadata tables because metadata will rarely be present on traits
     slot_metadata_table: HashMap<usize, Box<[Metadata<'gc>]>>,
@@ -105,16 +128,50 @@ impl<'gc> ClassBoundMethod<'gc> {
     }
 }
 
+/// Procura um nome nas proprias e, nao achando, sobe a cadeia.
+fn buscar_na_cadeia<'gc>(
+    proprios: &PropertyMap<'gc, Property>,
+    pai: Option<VTable<'gc>>,
+    name: QName<'gc>,
+) -> Option<Property> {
+    if let Some(p) = proprios.get(name) {
+        return Some(*p);
+    }
+    pai.and_then(|v| v.get_trait_qname(name))
+}
+
+/// Traz a entrada herdada pra tabela desta classe, pra poder ser alterada.
+///
+/// Um "getter" declarado aqui e um "setter" herdado precisam virar UMA
+/// propriedade so. Antes isso era simples porque a tabela ja era uma copia
+/// achatada e dava pra mexer nela a vontade. Agora o herdado e do pai e
+/// NINGUEM pode mexer nele — ele e visto por todas as outras subclasses. Entao
+/// a entrada e copiada pra ca primeiro, e a alteracao acontece na copia.
+fn garantir_proprio<'a, 'gc>(
+    proprios: &'a mut PropertyMap<'gc, Property>,
+    pai: Option<VTable<'gc>>,
+    name: QName<'gc>,
+) -> Option<&'a mut Property> {
+    if proprios.get(name).is_none()
+        && let Some(herdado) = pai.and_then(|v| v.get_trait_qname(name))
+    {
+        proprios.insert(name, herdado);
+    }
+    proprios.get_mut(name)
+}
+
 impl<'gc> VTable<'gc> {
     pub fn empty(mc: &Mutation<'gc>) -> Self {
-        // Montada na mao porque `resolved_traits` agora e um `Gc`, e `Gc` nao
-        // tem Default — nao haveria onde alocar sem a mutacao em maos.
+        // Montada na mao porque a estrutura ganhou campos que nao tem Default
+        // util (o ponteiro pro pai e a contagem da cadeia).
         VTable(Gc::new(
             mc,
             VTableData {
                 scope: None,
                 protected_namespace: None,
-                resolved_traits: Gc::new(mc, PropertyMap::new()),
+                traits_proprios: PropertyMap::new(),
+                pai: None,
+                total_na_cadeia: 0,
                 slot_metadata_table: HashMap::new(),
                 disp_metadata_table: HashMap::new(),
                 slot_table: Box::new([]),
@@ -137,8 +194,6 @@ impl<'gc> VTable<'gc> {
             super_class_obj,
             scope,
             superclass_vtable,
-            mc,
-            true,
         )?;
         Ok(VTable(Gc::new(mc, this)))
     }
@@ -151,25 +206,70 @@ impl<'gc> VTable<'gc> {
         superclass_vtable: Option<Self>,
         context: &UpdateContext<'gc>,
     ) -> Result<Self, VTableInitError> {
-        // Compartilhar esta DESLIGADO aqui porque o passo seguinte,
-        // `copy_interface_properties`, ACRESCENTA entradas na tabela. Se ela
-        // fosse a tabela do pai, escrever nela estragaria a classe de cima e
-        // todas as outras que a usam.
         let mut this = Self::init_vtable(
             defining_class_def,
             super_class_obj,
             scope,
             superclass_vtable,
-            context.gc(),
-            false,
         )?;
         Self::copy_interface_properties(&mut this, defining_class_def, context);
 
         Ok(VTable(Gc::new(context.gc(), this)))
     }
 
-    pub fn resolved_traits(self) -> &'gc PropertyMap<'gc, Property> {
-        Gc::as_ref(Gc::as_ref(self.0).resolved_traits)
+    /// Procura uma propriedade nesta classe e, nao achando, nos ancestrais.
+    ///
+    /// A ordem importa e e a mesma de antes: o que a classe declara GANHA do
+    /// que ela herda. Na tabela achatada isso acontecia porque o proprio era
+    /// inserido por cima do herdado; aqui acontece porque o proprio e
+    /// consultado primeiro.
+    pub fn get_trait(self, name: &Multiname<'gc>) -> Option<Property> {
+        let mut atual = Some(self);
+        while let Some(v) = atual {
+            if let Some(prop) = Gc::as_ref(v.0).traits_proprios.get_for_multiname(name) {
+                return Some(*prop);
+            }
+            atual = Gc::as_ref(v.0).pai;
+        }
+        None
+    }
+
+    /// Como `get_trait`, mas procurando por nome exato.
+    pub fn get_trait_qname(self, name: QName<'gc>) -> Option<Property> {
+        let mut atual = Some(self);
+        while let Some(v) = atual {
+            if let Some(prop) = Gc::as_ref(v.0).traits_proprios.get(name) {
+                return Some(*prop);
+            }
+            atual = Gc::as_ref(v.0).pai;
+        }
+        None
+    }
+
+    /// A tabela ACHATADA, montada na hora.
+    ///
+    /// So pra quem precisa percorrer tudo — `describeType` e a janela de
+    /// depuracao. Monta da raiz pra baixo pra que o descendente sobrescreva o
+    /// ancestral, que e a mesma ordem de antes.
+    ///
+    /// E cara, e e por isso que a busca normal NAO passa por aqui: guardar
+    /// esta tabela pronta em cada classe era justamente o gasto que o conserto
+    /// eliminou.
+    pub fn traits_achatados(self) -> PropertyMap<'gc, Property> {
+        let mut cadeia = Vec::new();
+        let mut atual = Some(self);
+        while let Some(v) = atual {
+            cadeia.push(v);
+            atual = Gc::as_ref(v.0).pai;
+        }
+
+        let mut saida = PropertyMap::new();
+        for v in cadeia.iter().rev() {
+            for (local_name, ns, prop) in Gc::as_ref(v.0).traits_proprios.iter() {
+                saida.insert(QName::new(ns, local_name), *prop);
+            }
+        }
+        saida
     }
 
     pub fn get_metadata_for_slot(self, slot_id: usize) -> Option<&'gc [Metadata<'gc>]> {
@@ -205,7 +305,7 @@ impl<'gc> VTable<'gc> {
             return None;
         }
 
-        self.resolved_traits().get_for_multiname(name).cloned()
+        self.get_trait(name)
     }
 
     /// Coerces `value` to the type of the slot with id `slot_id`
@@ -228,7 +328,7 @@ impl<'gc> VTable<'gc> {
     }
 
     pub fn has_trait(self, name: &Multiname<'gc>) -> bool {
-        self.resolved_traits().get_for_multiname(name).is_some()
+        self.get_trait(name).is_some()
     }
 
     pub fn get_method(self, disp_id: usize) -> Option<Method<'gc>> {
@@ -274,8 +374,6 @@ impl<'gc> VTable<'gc> {
         super_class_obj: Option<ClassObject<'gc>>,
         scope: Option<ScopeChain<'gc>>,
         superclass_vtable: Option<Self>,
-        mc: &Mutation<'gc>,
-        pode_compartilhar: bool,
     ) -> Result<VTableData<'gc>, VTableInitError> {
         // Let's talk about slot_ids and disp_ids.
         // Specification is one thing, but reality is another.
@@ -328,23 +426,12 @@ impl<'gc> VTable<'gc> {
         // so long-term it's still something we should verify.
         // (and it's far from the only verification check we lack anyway)
 
-        // DA PRA APONTAR EM VEZ DE COPIAR?
+        // SO O QUE E DESTA CLASSE.
         //
-        // So quando esta classe nao mexe na tabela de jeito nenhum: nao
-        // declara nada de proprio, e nao tem namespace protegido pra copiar do
-        // pai com outro nome. Nesse caso a tabela dela e, entrada por entrada,
-        // a mesma do pai — e ai apontar e copiar dao no mesmo, so que um deles
-        // nao custa 8 KB.
-        let tabela_do_pai = superclass_vtable.map(|v| v.0.resolved_traits);
-        let compartilhar = pode_compartilhar
-            && tabela_do_pai.is_some()
-            && defining_class_def.traits().is_empty()
-            && !(defining_class_def.protected_namespace().is_some()
-                && superclass_vtable
-                    .map(|v| v.0.protected_namespace.is_some())
-                    .unwrap_or(false));
-
-        let mut resolved_traits = PropertyMap::new();
+        // Antes esta tabela comecava como uma copia inteira da do pai. Agora
+        // comeca vazia: o herdado fica onde esta, e a busca sobe a cadeia
+        // quando nao acha aqui.
+        let mut proprios = PropertyMap::new();
         let mut slot_metadata_table = HashMap::new();
         let mut disp_metadata_table = HashMap::new();
         let mut slot_table = Vec::new();
@@ -358,9 +445,6 @@ impl<'gc> VTable<'gc> {
         let mut force_auto_assign_slots = false;
 
         if let Some(superclass_vtable) = superclass_vtable {
-            if !compartilhar {
-                resolved_traits = superclass_vtable.resolved_traits().clone();
-            }
             slot_metadata_table = superclass_vtable.0.slot_metadata_table.clone();
             disp_metadata_table = superclass_vtable.0.disp_metadata_table.clone();
             slot_table.extend_from_slice(&superclass_vtable.0.slot_table);
@@ -373,10 +457,13 @@ impl<'gc> VTable<'gc> {
             {
                 // Copy all protected traits from superclass
                 // but with this class's protected namespace
-                for (local_name, ns, prop) in superclass_vtable.resolved_traits().iter() {
+                // Caminho raro (so classes com namespace protegido), entao
+                // aqui vale montar a visao achatada do pai de uma vez em vez
+                // de inventar um jeito de percorrer a cadeia sem duplicatas.
+                for (local_name, ns, prop) in superclass_vtable.traits_achatados().iter() {
                     if ns.exact_version_match(super_protected_namespace) {
                         let new_name = QName::new(protected_namespace, local_name);
-                        resolved_traits.insert(new_name, *prop);
+                        proprios.insert(new_name, *prop);
                     }
                 }
             }
@@ -407,20 +494,20 @@ impl<'gc> VTable<'gc> {
                         scope: Lock::new(scope),
                         method: *method,
                     };
-                    match resolved_traits.get(trait_data.name()) {
+                    match buscar_na_cadeia(&proprios, superclass_vtable, trait_data.name()) {
                         Some(Property::Method { disp_id, .. }) => {
                             if let Some(metadata) = trait_data.metadata() {
-                                disp_metadata_table.insert(*disp_id, metadata);
+                                disp_metadata_table.insert(disp_id, metadata);
                             }
 
-                            method_table[*disp_id] = entry;
+                            method_table[disp_id] = entry;
                         }
                         // note: ideally overwriting other property types
                         // should be a VerifyError
                         None => {
                             let disp_id = method_table.len();
                             method_table.push(entry);
-                            resolved_traits
+                            proprios
                                 .insert(trait_data.name(), Property::new_method(disp_id));
 
                             if let Some(metadata) = trait_data.metadata() {
@@ -438,7 +525,7 @@ impl<'gc> VTable<'gc> {
                         scope: Lock::new(scope),
                         method: *method,
                     };
-                    match resolved_traits.get_mut(trait_data.name()) {
+                    match garantir_proprio(&mut proprios, superclass_vtable, trait_data.name()) {
                         Some(Property::Virtual {
                             get: Some(disp_id), ..
                         }) => {
@@ -460,7 +547,7 @@ impl<'gc> VTable<'gc> {
                         None => {
                             let disp_id = method_table.len();
                             method_table.push(entry);
-                            resolved_traits
+                            proprios
                                 .insert(trait_data.name(), Property::new_getter(disp_id));
 
                             if let Some(metadata) = trait_data.metadata() {
@@ -478,7 +565,7 @@ impl<'gc> VTable<'gc> {
                         scope: Lock::new(scope),
                         method: *method,
                     };
-                    match resolved_traits.get_mut(trait_data.name()) {
+                    match garantir_proprio(&mut proprios, superclass_vtable, trait_data.name()) {
                         Some(Property::Virtual {
                             set: Some(disp_id), ..
                         }) => {
@@ -500,7 +587,7 @@ impl<'gc> VTable<'gc> {
                         None => {
                             let disp_id = method_table.len();
                             method_table.push(entry);
-                            resolved_traits
+                            proprios
                                 .insert(trait_data.name(), Property::new_setter(disp_id));
 
                             if let Some(metadata) = trait_data.metadata() {
@@ -579,7 +666,7 @@ impl<'gc> VTable<'gc> {
                         _ => unreachable!(),
                     };
 
-                    resolved_traits.insert(trait_data.name(), property);
+                    proprios.insert(trait_data.name(), property);
                 }
             }
         }
@@ -598,21 +685,24 @@ impl<'gc> VTable<'gc> {
             }
         }
 
-        let resolved_traits = match (compartilhar, tabela_do_pai) {
-            (true, Some(do_pai)) => {
-                COMPARTILHADAS.with(|c| c.set(c.get() + 1));
-                do_pai
-            }
-            _ => {
-                COPIADAS.with(|c| c.set(c.get() + 1));
-                Gc::new(mc, resolved_traits)
-            }
-        };
+        // A MEDIDA DO CONSERTO.
+        //
+        // "poupadas" e quanto esta vtable NAO copiou do pai; "proprias" e o
+        // que ela de fato guardou. Antes, a primeira seria somada a segunda em
+        // cada uma das dezenas de milhares de vtables.
+        let herdadas = superclass_vtable
+            .map(|v| Gc::as_ref(v.0).total_na_cadeia)
+            .unwrap_or(0);
+        MONTADAS.with(|c| c.set(c.get() + 1));
+        ENTRADAS_POUPADAS.with(|c| c.set(c.get() + herdadas as u64));
+        ENTRADAS_PROPRIAS.with(|c| c.set(c.get() + proprios.iter().count() as u64));
 
         Ok(VTableData {
             scope,
             protected_namespace: defining_class_def.protected_namespace(),
-            resolved_traits,
+            total_na_cadeia: herdadas + proprios.iter().count(),
+            pai: superclass_vtable,
+            traits_proprios: proprios,
             slot_metadata_table,
             disp_metadata_table,
             slot_table: slot_table.into_boxed_slice(),
@@ -631,29 +721,23 @@ impl<'gc> VTable<'gc> {
         // See the ignored test 'tests/tests/swfs/avm2/weird_superinterface_properties/'
         let internal_ns = context.avm2.namespaces.public_vm_internal();
 
-        // A tabela agora mora atras de um `Gc`, que nao deixa escrever por
-        // dentro — de proposito, porque ela pode estar sendo apontada por
-        // outras classes. Aqui ela nunca esta (quem chega neste caminho pediu
-        // a vtable com o compartilhamento desligado), mas o jeito certo e o
-        // mesmo nos dois casos: montar a nova ao lado e trocar no fim.
-        let mut nova = (*this.resolved_traits).clone();
-        let mut mexeu = false;
-
         for interface in class.all_interfaces() {
             for interface_trait in interface.traits() {
                 let interface_name = interface_trait.name();
                 if !interface_name.namespace().is_public() {
                     let public_name = QName::new(internal_ns, interface_name.local_name());
-                    if let Some(prop) = nova.get(public_name).copied() {
-                        nova.insert(interface_name, prop);
-                        mexeu = true;
+                    // A propriedade procurada pode ser herdada, entao a busca
+                    // sobe a cadeia; a copia, porem, entra SEMPRE na tabela
+                    // desta classe — mexer na do pai estragaria todas as
+                    // outras subclasses dele.
+                    if let Some(prop) =
+                        buscar_na_cadeia(&this.traits_proprios, this.pai, public_name)
+                    {
+                        this.traits_proprios.insert(interface_name, prop);
+                        this.total_na_cadeia += 1;
                     }
                 }
             }
-        }
-
-        if mexeu {
-            this.resolved_traits = Gc::new(context.gc(), nova);
         }
     }
 
@@ -699,10 +783,13 @@ impl<'gc> VTable<'gc> {
     }
 
     pub fn public_properties(self) -> impl Iterator<Item = (AvmString<'gc>, Property)> {
-        self.resolved_traits()
+        let achatada = self.traits_achatados();
+        let saida: Vec<_> = achatada
             .iter()
             .filter(|(_, ns, _)| ns.is_public())
             .map(|(name, _, prop)| (name, *prop))
+            .collect();
+        saida.into_iter()
     }
 }
 

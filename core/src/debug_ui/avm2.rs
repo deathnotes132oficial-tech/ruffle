@@ -263,9 +263,8 @@ impl Avm2ObjectWindow {
         activation: &mut Activation<'_, 'gc>,
         ui: &mut Ui,
     ) {
-        let mut entries: Vec<(Cow<'gc, str>, Namespace<'gc>, Property)> = object
-            .vtable()
-            .resolved_traits()
+        let achatada = object.vtable().traits_achatados();
+        let mut entries: Vec<(Cow<'gc, str>, Namespace<'gc>, Property)> = achatada
             .iter()
             .map(|(name, ns, prop)| (name.as_wstr().to_utf8_lossy(), ns, *prop))
             .collect();

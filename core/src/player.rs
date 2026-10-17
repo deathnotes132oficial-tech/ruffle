@@ -1376,8 +1376,10 @@ impl Player {
         // entradas herdadas; agora aponta para a tabela do pai. "compart" e
         // quantas aproveitaram; se esse numero for uma fatia grande do total,
         // o conserto pegou.
-        let (compartilhadas, copiadas) = crate::avm2::contagem_de_vtables();
-        tracing::warn!("VTABLES: compart {compartilhadas} proprias {copiadas}");
+        let (montadas, poupadas, proprias_vt) = crate::avm2::contagem_de_vtables();
+        tracing::warn!(
+            "VTABLES: montadas {montadas} | entradas proprias {proprias_vt} poupadas {poupadas}"
+        );
 
         let (proprias, dependentes, bytes_buffer, copias) =
             crate::string::contagem_de_strings();
