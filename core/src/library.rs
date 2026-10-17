@@ -213,6 +213,18 @@ pub struct MovieLibrary<'gc> {
     /// stay because that code can still ask for the movie's characters.
     translation_units: Vec<Avm2TranslationUnitWeak<'gc>>,
 
+    /// The movies above this one in the SWF hierarchy: the movie whose code
+    /// started this movie's load, then that movie's own ancestors, copied
+    /// when the load was set up. The list is flat so that
+    /// [`Library::movies_loaded_by`] finds every movie below a given one
+    /// without walking a chain. Held weakly so that a loaded movie never
+    /// keeps the movies above it alive.
+    ///
+    /// If the starting movie's library was already released when the load was
+    /// set up, the list holds that movie alone, and unloading a movie further
+    /// up misses this one.
+    ancestors: Vec<SwfMovieWeak<'gc>>,
+
     /// Whether this library is exempt from being released. See [`Pin`].
     pin: Pin,
 
@@ -272,6 +284,7 @@ impl<'gc> MovieLibrary<'gc> {
             avm2_domain: None,
             content_root: None,
             translation_units: Vec::new(),
+            ancestors: Vec::new(),
             pin: Pin::None,
             kept: false,
         }
@@ -284,6 +297,7 @@ impl<'gc> MovieLibrary<'gc> {
     fn trace_anchors<C: Trace<'gc>>(&self, cc: &mut C) {
         cc.trace(&self.content_root);
         cc.trace(&self.translation_units);
+        cc.trace(&self.ancestors);
     }
 
     /// Traces everything this library owns: its movie, characters, fonts,
@@ -346,6 +360,11 @@ impl<'gc> MovieLibrary<'gc> {
     /// deliberately has no content root, so that its library is never swept.
     pub fn set_content_root(&mut self, root: DisplayObjectWeak<'gc>) {
         self.content_root = Some(root);
+    }
+
+    /// The display object this movie was loaded into, while it is alive.
+    pub fn content_root(&self, mc: &Mutation<'gc>) -> Option<DisplayObject<'gc>> {
+        self.content_root.and_then(|root| root.upgrade(mc))
     }
 
     /// Whether this library was loaded for content that is still reachable.
@@ -808,6 +827,32 @@ impl<'gc> Library<'gc> {
 
     pub fn known_movies(&self) -> impl Iterator<Item = SwfMovie<'gc>> {
         self.movie_libraries.known_movies()
+    }
+
+    pub fn set_loaded_by(&mut self, movie: SwfMovie<'gc>, started_by: SwfMovie<'gc>) {
+        let ancestors = std::iter::once(started_by.downgrade())
+            .chain(
+                self.library_for_movie(started_by)
+                    .into_iter()
+                    .flat_map(|library| library.ancestors.iter().copied()),
+            )
+            .collect();
+        self.library_for_movie_mut(movie).ancestors = ancestors;
+    }
+
+    /// Every movie that `movie`'s code loaded, at any depth.
+    pub fn movies_loaded_by(&self, mc: &Mutation<'gc>, movie: SwfMovie<'gc>) -> Vec<SwfMovie<'gc>> {
+        self.movie_libraries
+            .0
+            .iter()
+            .filter(|(_, library)| {
+                library
+                    .ancestors
+                    .iter()
+                    .any(|ancestor| ancestor.upgrade(mc) == Some(movie))
+            })
+            .map(|(loaded, _)| *loaded)
+            .collect()
     }
 
     /// Marks `movie` as the movie the player was started with, whose library

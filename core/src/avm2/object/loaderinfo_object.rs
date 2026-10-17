@@ -1,17 +1,20 @@
 //! Loader-info object
 
 use crate::avm2::activation::Activation;
+use crate::avm2::events;
 use crate::avm2::object::script_object::ScriptObjectData;
-use crate::avm2::object::{EventObject, Object, StageObject, TObject};
+use crate::avm2::object::{EventObject, FunctionObject, Object, StageObject, TObject};
 use crate::avm2::{Avm2, Error};
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
 use crate::loader::ContentType;
+use crate::string::AvmString;
 use crate::tag_utils::{SwfMovie, SwfMovieData};
 use core::fmt;
 use gc_arena::barrier::unlock;
 use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::Lock};
 use ruffle_common::utils::HasPrefixField;
+use ruffle_macros::istr;
 use std::cell::Cell;
 
 /// Represents a thing which can be loaded by a loader.
@@ -293,6 +296,123 @@ impl<'gc> LoaderInfoObject<'gc> {
         if let Some(child) = content {
             loader.remove_child(context, child);
         }
+    }
+
+    /// Unloads like [`Self::unload`], first stopping what the content runs,
+    /// as Flash documents for `Loader.unloadAndStop`: the timelines, sounds,
+    /// and frame and activation listeners of its display objects, and the
+    /// stage listeners and timers that its code started. Every movie that its
+    /// code loaded, at any depth, goes the same way.
+    pub fn unload_and_stop(self, context: &mut UpdateContext<'gc>) {
+        let stream = self.loader_stream();
+        let content = match stream {
+            LoaderStream::Swf(_, root) => Some(root),
+            LoaderStream::NotYetLoaded(_, root, _) => root,
+        };
+
+        if let Some(content) = content {
+            let loaded = context
+                .library
+                .movies_loaded_by(context.gc(), stream.movie());
+            let contents: Vec<_> = std::iter::once(content)
+                .chain(
+                    loaded
+                        .iter()
+                        .filter_map(|movie| content_root(context, *movie)),
+                )
+                .collect();
+            let unload_events = unload_events(context);
+
+            for content in &contents {
+                context.stop_sounds_on_parent_and_children(*content);
+                stop_content(context, *content, &contents, &unload_events);
+            }
+
+            let movies: Vec<_> = std::iter::once(stream.movie()).chain(loaded).collect();
+            debug_assert!(!movies.contains(context.root_swf));
+            context.stop_sounds_started_by(&movies);
+            let mc = context.gc();
+            context.timers.remove_owned_by(mc, &movies);
+            remove_stage_listeners_of(context, &movies);
+            remove_unload_listeners_of(context, &movies, &unload_events);
+        }
+
+        self.unload(context);
+    }
+}
+
+/// `render` is not in Flash's documented list; Artix's Ruffle build removes it
+/// too.
+fn unload_events<'gc>(context: &UpdateContext<'gc>) -> [AvmString<'gc>; 6] {
+    [
+        istr!(context, "enterFrame"),
+        istr!(context, "exitFrame"),
+        istr!(context, "frameConstructed"),
+        istr!(context, "render"),
+        istr!(context, "activate"),
+        istr!(context, "deactivate"),
+    ]
+}
+
+fn content_root<'gc>(
+    context: &UpdateContext<'gc>,
+    movie: SwfMovie<'gc>,
+) -> Option<DisplayObject<'gc>> {
+    context
+        .library
+        .library_for_movie(movie)?
+        .content_root(context.gc())
+}
+
+fn stop_content<'gc>(
+    context: &mut UpdateContext<'gc>,
+    object: DisplayObject<'gc>,
+    contents: &[DisplayObject<'gc>],
+    unload_events: &[AvmString<'gc>],
+) {
+    if let Some(clip) = object.as_movie_clip() {
+        clip.stop(context);
+    }
+
+    if let Some(object) = object.object2() {
+        events::retain_listeners(context.gc(), object.into(), |event, _| {
+            !unload_events.contains(&event)
+        });
+    }
+
+    if let Some(container) = object.as_container() {
+        for child in container.iter_render_list() {
+            if !contents
+                .iter()
+                .any(|content| DisplayObject::ptr_eq(*content, child))
+            {
+                stop_content(context, child, contents, unload_events);
+            }
+        }
+    }
+}
+
+fn is_owned_by<'gc>(movies: &[SwfMovie<'gc>], handler: FunctionObject<'gc>) -> bool {
+    movies.contains(&handler.executable().as_method().owner_movie())
+}
+
+fn remove_stage_listeners_of<'gc>(context: &mut UpdateContext<'gc>, movies: &[SwfMovie<'gc>]) {
+    if let Some(stage) = context.stage.object2() {
+        events::retain_listeners(context.gc(), stage.into(), |_, handler| {
+            !is_owned_by(movies, handler)
+        });
+    }
+}
+
+fn remove_unload_listeners_of<'gc>(
+    context: &mut UpdateContext<'gc>,
+    movies: &[SwfMovie<'gc>],
+    unload_events: &[AvmString<'gc>],
+) {
+    for object in context.avm2.broadcast_listeners(context.gc()) {
+        events::retain_listeners(context.gc(), object, |event, handler| {
+            !(unload_events.contains(&event) && is_owned_by(movies, handler))
+        });
     }
 }
 

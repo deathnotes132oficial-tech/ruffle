@@ -1,0 +1,15 @@
+running before unload: true
+stage keyDown listener before unload: true
+child activate listener before unload: true
+child stage enterFrame stopped: true
+child enterFrame stopped: true
+child Timer stopped: true
+child setInterval stopped: true
+child setTimeout cancelled: true
+grandchild stage enterFrame stopped: true
+grandchild Timer stopped: true
+parent enterFrame listener on child stopped: true
+stage keyDown listener after unload: false
+child activate listener after unload: false
+parent Timer still runs: true
+done

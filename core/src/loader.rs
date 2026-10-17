@@ -326,14 +326,7 @@ impl<'gc> LoadManager<'gc> {
             }
         }
 
-        let loader = MovieLoader {
-            self_handle: None,
-            target_clip,
-            vm_data,
-            loader_status: LoaderStatus::Pending,
-            movie: None,
-        };
-        let handle = self.add_loader(loader);
+        let handle = self.add_loader(MovieLoader::new(target_clip, vm_data));
         let loader = self.get_loader_mut(handle).unwrap();
         loader.movie_loader(player, request, loader_url)
     }
@@ -423,14 +416,9 @@ impl<'gc> LoadManager<'gc> {
         loader_url: String,
         vm_data: MovieLoaderVMData<'gc>,
     ) -> Result<(), Error> {
-        let loader = MovieLoader {
-            self_handle: None,
-            target_clip,
-            vm_data,
-            loader_status: LoaderStatus::Pending,
-            movie: None,
-        };
-        let handle = context.load_manager.add_loader(loader);
+        let handle = context
+            .load_manager
+            .add_loader(MovieLoader::new(target_clip, vm_data));
         MovieLoader::movie_loader_bytes(handle, context, loader_url, bytes)
     }
 
@@ -608,6 +596,8 @@ pub struct MovieLoader<'gc> {
     #[collect(require_static)]
     loader_status: LoaderStatus,
 
+    started_by: SwfMovie<'gc>,
+
     /// The SWF being loaded.
     ///
     /// This is only available if the asynchronous loader path has
@@ -617,6 +607,25 @@ pub struct MovieLoader<'gc> {
 }
 
 impl<'gc> MovieLoader<'gc> {
+    fn new(target_clip: DisplayObject<'gc>, vm_data: MovieLoaderVMData<'gc>) -> Self {
+        let started_by = match vm_data {
+            MovieLoaderVMData::Avm1 { base_clip, .. } => base_clip.movie(),
+            MovieLoaderVMData::Avm2 { loader_info, .. } => loader_info
+                .loader()
+                .expect("A Loader's LoaderInfo has a Loader")
+                .display_object()
+                .movie(),
+        };
+        Self {
+            self_handle: None,
+            target_clip,
+            vm_data,
+            loader_status: LoaderStatus::Pending,
+            started_by,
+            movie: None,
+        }
+    }
+
     fn replace_root_movie(&mut self, new_root: DisplayObject<'gc>) {
         self.target_clip = new_root;
         if let MovieLoaderVMData::Avm1 { base_clip, .. } = &mut self.vm_data {
@@ -1500,6 +1509,7 @@ pub fn load_sound_avm2<'gc>(
         player.lock().unwrap().update(|uc| {
             let sound = sound.fetch(uc);
             let sound_object = Avm2Object::from(sound);
+            uc.audio_manager.remove_loading_sound(sound);
 
             if sound.loading_state() == SoundLoadingState::Loaded {
                 // Sound has already been loaded.
@@ -1679,12 +1689,13 @@ impl<'gc> MovieLoader<'gc> {
         {
             return Self::movie_loader_data(handle, uc, &data, url, status, redirected, loader_url);
         }
-        let (clip, vm_data) = match uc.load_manager.get_loader(handle) {
+        let (clip, vm_data, started_by) = match uc.load_manager.get_loader(handle) {
             Some(Self {
                 target_clip,
                 vm_data,
+                started_by,
                 ..
-            }) => (*target_clip, *vm_data),
+            }) => (*target_clip, *vm_data, *started_by),
             None => return Err(Error::Cancelled),
         };
 
@@ -1757,6 +1768,10 @@ impl<'gc> MovieLoader<'gc> {
             }
             _ => unreachable!(),
         };
+
+        if sniffed_type != ContentType::Unknown {
+            uc.library.set_loaded_by(movie, started_by);
+        }
 
         if let MovieLoaderVMData::Avm2 { loader_info, .. } = vm_data {
             loader_info.set_content_type(sniffed_type);

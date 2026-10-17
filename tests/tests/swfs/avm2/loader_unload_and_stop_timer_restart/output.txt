@@ -1,0 +1,6 @@
+started by the child, running: true
+ticks before unload: true
+running after unloadAndStop: false
+restarted by the parent, running: true
+ticks after the restart: true
+done

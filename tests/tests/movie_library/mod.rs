@@ -1,6 +1,7 @@
 //! Lifetime tests for the libraries of dynamically loaded movies.
 
 use ruffle_core::Player;
+use ruffle_core::memory_report::MemoryReport;
 use ruffle_test_framework::environment::Environment;
 use ruffle_test_framework::options::TestOptions;
 use ruffle_test_framework::runner::TestStatus;
@@ -176,4 +177,45 @@ pub fn released_class_frees_library(
         }
         Ok(())
     })
+}
+
+fn leaves_nothing_behind(
+    environment: &impl Environment,
+    name: &str,
+) -> Result<(), libtest_mimic::Failed> {
+    let dir = VfsPath::new(PhysicalFS::new(format!("tests/swfs/avm2/{name}/")));
+    let options = TestOptions::read(&dir.join("test.toml")?)?;
+    let test = &Test::from_options(options, dir, name.to_string())?;
+
+    let mut runner = test.create_test_runner(environment)?;
+    loop {
+        match runner.tick()? {
+            TestStatus::Continue => {}
+            TestStatus::Sleep(duration) => sleep(duration),
+            TestStatus::Finished => break,
+        }
+    }
+
+    let mut player = runner.player().lock().unwrap();
+    player.collect_all_garbage();
+    player.collect_all_garbage();
+    let pending =
+        player.mutate_with_update_context(|context| MemoryReport::capture(context).pending_loaders);
+    if pending > 0 {
+        return Err(format!("{pending} loads of unloaded Loaders are still registered").into());
+    }
+    let unloaded: Vec<_> = resident_movies(&mut player)
+        .into_iter()
+        .filter(|url| !url.ends_with("test.swf"))
+        .collect();
+    if !unloaded.is_empty() {
+        return Err(format!("unloaded movies are still resident: {unloaded:?}").into());
+    }
+    Ok(())
+}
+
+pub fn unloading_itself_releases_library(
+    environment: &impl Environment,
+) -> Result<(), libtest_mimic::Failed> {
+    leaves_nothing_behind(environment, "loader_unload_and_stop_self")
 }

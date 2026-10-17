@@ -305,9 +305,10 @@ impl<'gc> UpdateContext<'gc> {
         &mut self,
         instance: SoundInstanceHandle,
         avm2_object: SoundChannelObject<'gc>,
+        started_by: Option<SwfMovie<'gc>>,
     ) {
         self.audio_manager
-            .attach_avm2_sound_channel(instance, avm2_object);
+            .attach_avm2_sound_channel(instance, avm2_object, started_by);
     }
 
     pub fn stop_sound(&mut self, instance: SoundInstanceHandle) {
@@ -327,6 +328,11 @@ impl<'gc> UpdateContext<'gc> {
     pub fn stop_sounds_on_parent_and_children(&mut self, display_object: DisplayObject<'gc>) {
         self.audio_manager
             .stop_sounds_on_parent_and_children(self.audio, display_object)
+    }
+
+    pub fn stop_sounds_started_by(&mut self, movies: &[SwfMovie<'gc>]) {
+        self.audio_manager
+            .stop_sounds_started_by(self.audio, self.gc_context, movies)
     }
 
     pub fn stop_all_sounds(&mut self) {

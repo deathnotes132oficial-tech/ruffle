@@ -1,0 +1,6 @@
+grandchild on the display list: false
+grandchild runs before unload: stage enterFrame true, own enterFrame true, Timer true
+grandchild stage enterFrame stopped: true
+grandchild own enterFrame stopped: true
+grandchild Timer stopped: true
+done

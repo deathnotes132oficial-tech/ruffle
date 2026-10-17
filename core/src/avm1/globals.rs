@@ -350,10 +350,11 @@ pub fn create_timer<'gc>(
     // Otherwise, set a repeat count of 0 (repeat indefinitely)
     //
     // We start the timer immediately
+    let owner = activation.base_clip().movie();
     let id = activation
         .context
         .timers
-        .add_timer(callback, interval, is_timeout);
+        .add_timer(callback, interval, is_timeout, owner);
 
     Ok(id.into())
 }

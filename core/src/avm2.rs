@@ -426,6 +426,15 @@ impl<'gc> Avm2<'gc> {
         bucket.push(object.downgrade());
     }
 
+    /// The live objects registered for any broadcast event.
+    pub fn broadcast_listeners(&self, mc: &Mutation<'gc>) -> Vec<Object<'gc>> {
+        self.broadcast_list
+            .values()
+            .flatten()
+            .filter_map(|object| object.upgrade(mc))
+            .collect()
+    }
+
     /// Dispatch an event on all objects in the current execution list.
     ///
     /// `on_type` specifies a class or interface constructor whose instances,

@@ -2,12 +2,16 @@ use std::any::Any;
 
 use crate::{
     avm1::{NativeObject, Object as Avm1Object},
-    avm2::{Avm2, EventObject as Avm2EventObject, SoundChannelObject},
+    avm2::{
+        Avm2, EventObject as Avm2EventObject, Object as Avm2Object, SoundChannelObject,
+        object::SoundObject,
+    },
     context::UpdateContext,
     display_object::{self, DisplayObject, MovieClip, TDisplayObject},
     string::AvmString,
+    tag_utils::SwfMovie,
 };
-use gc_arena::Collect;
+use gc_arena::{Collect, Mutation};
 pub use ruffle_common::buffer::Substream;
 use ruffle_common::duration::FloatDuration;
 use slotmap::{SlotMap, new_key_type};
@@ -390,6 +394,9 @@ pub struct AudioManager<'gc> {
     /// The list of actively playing sounds.
     sounds: Vec<SoundInstance<'gc>>,
 
+    /// The AS3 sounds still loading, which hold their queued `Sound.play` calls.
+    loading_sounds: Vec<SoundObject<'gc>>,
+
     /// The global sound transform applied to all sounds.
     #[collect(require_static)]
     global_sound_transform: display_object::SoundTransform,
@@ -423,6 +430,7 @@ impl<'gc> AudioManager<'gc> {
     pub fn new() -> Self {
         Self {
             sounds: Vec::with_capacity(Self::MAX_SOUNDS),
+            loading_sounds: Vec::new(),
             global_sound_transform: Default::default(),
             stream_buffer_time: Self::DEFAULT_STREAM_BUFFER_TIME,
             transforms_dirty: false,
@@ -517,6 +525,7 @@ impl<'gc> AudioManager<'gc> {
                 transform: display_object::SoundTransform::default(),
                 avm1_object,
                 avm2_object: None,
+                started_by: None,
                 stream_start_frame: None,
             };
 
@@ -536,6 +545,7 @@ impl<'gc> AudioManager<'gc> {
         &mut self,
         instance: SoundInstanceHandle,
         avm2_object: SoundChannelObject<'gc>,
+        started_by: Option<SwfMovie<'gc>>,
     ) {
         if let Some(i) = self
             .sounds
@@ -544,6 +554,7 @@ impl<'gc> AudioManager<'gc> {
         {
             let instance = &mut self.sounds[i];
             instance.avm2_object = Some(avm2_object);
+            instance.started_by = started_by;
         }
     }
 
@@ -617,6 +628,39 @@ impl<'gc> AudioManager<'gc> {
         });
     }
 
+    pub fn add_loading_sound(&mut self, sound: SoundObject<'gc>) {
+        self.loading_sounds.push(sound);
+    }
+
+    pub fn remove_loading_sound(&mut self, sound: SoundObject<'gc>) {
+        self.loading_sounds
+            .retain(|other| !Avm2Object::ptr_eq(*other, sound));
+    }
+
+    /// Stops the sounds that the code of `movies` played, and drops the
+    /// plays it queued on sounds still loading.
+    pub fn stop_sounds_started_by(
+        &mut self,
+        audio: &mut dyn AudioBackend,
+        mc: &Mutation<'gc>,
+        movies: &[SwfMovie<'gc>],
+    ) {
+        for sound in &self.loading_sounds {
+            sound.drop_plays_queued_by(mc, movies);
+        }
+        self.sounds.retain(|sound| {
+            if sound
+                .started_by
+                .is_some_and(|movie| movies.contains(&movie))
+            {
+                audio.stop_sound(sound.instance);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     pub fn stop_all_sounds(&mut self, audio: &mut dyn AudioBackend) {
         self.sounds.clear();
         audio.stop_all_sounds();
@@ -647,6 +691,7 @@ impl<'gc> AudioManager<'gc> {
                 transform: display_object::SoundTransform::default(),
                 avm1_object: None,
                 avm2_object: None,
+                started_by: None,
                 stream_start_frame: Some(clip_frame),
             };
             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
@@ -673,6 +718,7 @@ impl<'gc> AudioManager<'gc> {
                 transform: display_object::SoundTransform::default(),
                 avm1_object: None,
                 avm2_object: None,
+                started_by: None,
                 stream_start_frame: None,
             };
             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
@@ -913,6 +959,8 @@ pub struct SoundInstance<'gc> {
 
     /// The AVM2 `SoundChannel` object associated with this sound, if any.
     avm2_object: Option<SoundChannelObject<'gc>>,
+
+    started_by: Option<SwfMovie<'gc>>,
 
     stream_start_frame: Option<u16>,
 }

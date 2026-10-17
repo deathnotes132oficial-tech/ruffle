@@ -40,12 +40,15 @@ pub fn set_interval<'gc>(
     let callback = crate::timer::TimerCallback::Avm2Callback {
         closure,
         params: params.to_vec(),
+        flash_timer: None,
     };
 
+    let owner = activation.caller_movie_or_root();
     Ok(Value::Integer(activation.context.timers.add_timer(
         callback,
         interval as i32,
         false,
+        owner,
     )))
 }
 
@@ -73,12 +76,15 @@ pub fn set_timeout<'gc>(
     let callback = crate::timer::TimerCallback::Avm2Callback {
         closure,
         params: params.to_vec(),
+        flash_timer: None,
     };
 
+    let owner = activation.caller_movie_or_root();
     Ok(Value::Integer(activation.context.timers.add_timer(
         callback,
         interval as i32,
         true,
+        owner,
     )))
 }
 

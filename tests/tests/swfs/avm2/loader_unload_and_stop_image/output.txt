@@ -1,0 +1,5 @@
+image loaded: [object Bitmap]
+after unloadAndStop of an image: parent stage listener kept true, own listener kept true, stage enterFrame fires true, own enterFrame fires true, Timer ticks true, running true
+holder loaded its image: [object Bitmap]
+after unloadAndStop of a SWF holding an image Loader: parent stage listener kept true, own listener kept true, stage enterFrame fires true, own enterFrame fires true, Timer ticks true, running true
+done

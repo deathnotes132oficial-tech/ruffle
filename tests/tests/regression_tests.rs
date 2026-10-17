@@ -6,6 +6,7 @@ use crate::environment::NativeEnvironment;
 use crate::external_interface::tests::{external_interface_avm1, external_interface_avm2};
 use crate::movie_library::{
     loader_unload_releases_library, released_class_frees_library, retained_class_keeps_library,
+    unloading_itself_releases_library,
 };
 use crate::shared_object::{shared_object_avm1, shared_object_avm2, shared_object_self_ref_avm1};
 use crate::weak_dictionary::weak_keys_are_collected;
@@ -112,6 +113,12 @@ fn main() {
     runner.with_additional_test(Trial::test("loader_unload_releases_library", move || {
         loader_unload_releases_library(&*env_clone)
     }));
+
+    let env_clone = env.clone();
+    runner.with_additional_test(Trial::test(
+        "unloading_itself_releases_library",
+        move || unloading_itself_releases_library(&*env_clone),
+    ));
 
     let env_clone = env.clone();
     runner.with_additional_test(Trial::test("retained_class_keeps_library", move || {

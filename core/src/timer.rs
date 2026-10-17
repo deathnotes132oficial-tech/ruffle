@@ -7,14 +7,16 @@
 use crate::avm1::ExecutionReason;
 use crate::avm1::{Activation, ActivationIdentifier, Object as Avm1Object, Value as Avm1Value};
 use crate::avm2::error::make_null_or_undefined_error;
-use crate::avm2::object::FunctionObject as Avm2FunctionObject;
+use crate::avm2::globals::flash::utils::timer as flash_utils_timer;
+use crate::avm2::object::{FunctionObject as Avm2FunctionObject, Object as Avm2Object};
 use crate::avm2::{
     Activation as Avm2Activation, Avm2, Error as Avm2Error, FunctionArgs, Value as Avm2Value,
 };
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, TDisplayObject};
 use crate::string::AvmString;
-use gc_arena::Collect;
+use crate::tag_utils::SwfMovie;
+use gc_arena::{Collect, Mutation};
 use ruffle_common::duration::FloatDuration;
 use std::collections::{BinaryHeap, binary_heap::PeekMut};
 
@@ -140,7 +142,9 @@ impl<'gc> Timers<'gc> {
                         true
                     }
                 }
-                TimerCallback::Avm2Callback { closure, params } => {
+                TimerCallback::Avm2Callback {
+                    closure, params, ..
+                } => {
                     let domain = context.avm2.stage_domain();
                     let mut avm2_activation = Avm2Activation::from_domain(context, domain);
 
@@ -249,6 +253,7 @@ impl<'gc> Timers<'gc> {
         callback: TimerCallback<'gc>,
         interval: i32,
         is_timeout: bool,
+        owner: SwfMovie<'gc>,
     ) -> i32 {
         // SANITY: Set a minimum interval so we don't spam too much.
         let interval = interval.max(Self::MIN_INTERVAL) as u64 * (Self::TIMER_SCALE as u64);
@@ -259,6 +264,7 @@ impl<'gc> Timers<'gc> {
         let id = self.timer_counter;
         let timer = Timer {
             id,
+            owner,
             callback,
             tick_time: self.cur_time + interval,
             interval,
@@ -280,6 +286,22 @@ impl<'gc> Timers<'gc> {
 
     pub fn remove_all(&mut self) {
         self.timers.clear()
+    }
+
+    /// Removes every timer created by the code of one of `movies`.
+    pub fn remove_owned_by(&mut self, mc: &Mutation<'gc>, movies: &[SwfMovie<'gc>]) {
+        self.timers.retain(|t| {
+            let owned = movies.contains(&t.owner);
+            if owned
+                && let TimerCallback::Avm2Callback {
+                    flash_timer: Some(flash_timer),
+                    ..
+                } = &t.callback
+            {
+                flash_utils_timer::mark_stopped(*flash_timer, mc);
+            }
+            !owned
+        });
     }
 
     /// Changes the delay of a timer.
@@ -332,6 +354,9 @@ impl Default for Timers<'_> {
 pub struct Timer<'gc> {
     /// The ID of the timer.
     id: i32,
+
+    /// The movie whose code created this timer.
+    owner: SwfMovie<'gc>,
 
     /// The callback that this timer runs when it fires.
     /// A callback is either a function object, or a parent object with a method name.
@@ -387,5 +412,6 @@ pub enum TimerCallback<'gc> {
     Avm2Callback {
         closure: Option<Avm2FunctionObject<'gc>>,
         params: Vec<Avm2Value<'gc>>,
+        flash_timer: Option<Avm2Object<'gc>>,
     },
 }

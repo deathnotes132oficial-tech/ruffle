@@ -8,7 +8,7 @@ use crate::avm2::object::{EventObject, FunctionObject, Object, TObject as _};
 use crate::display_object::TDisplayObject;
 use crate::string::AvmString;
 use fnv::FnvHashMap;
-use gc_arena::Collect;
+use gc_arena::{Collect, Mutation};
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
@@ -267,6 +267,18 @@ impl<'gc> DispatchList<'gc> {
         false
     }
 
+    /// Remove the handlers for which `keep` returns false, from every event.
+    pub fn retain_handlers(
+        &mut self,
+        mut keep: impl FnMut(AvmString<'gc>, FunctionObject<'gc>) -> bool,
+    ) {
+        for (event, priorities) in self.0.iter_mut() {
+            for handlers in priorities.values_mut() {
+                handlers.retain(|h| keep(*event, h.handler));
+            }
+        }
+    }
+
     /// Yield the event handlers on this dispatch list for a given event.
     ///
     /// Event handlers will be yielded in the order they are intended to be
@@ -330,6 +342,20 @@ impl Hash for EventHandler<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.use_capture.hash(state);
         self.handler.as_ptr().hash(state);
+    }
+}
+
+/// Remove the listeners of `target` for which `keep` returns false.
+pub fn retain_listeners<'gc>(
+    mc: &Mutation<'gc>,
+    target: Object<'gc>,
+    keep: impl FnMut(AvmString<'gc>, FunctionObject<'gc>) -> bool,
+) {
+    if let Some(dispatch_list) = target.get_slot(slots::DISPATCH_LIST).as_object() {
+        dispatch_list
+            .as_dispatch_mut(mc)
+            .expect("Internal dispatch list is missing")
+            .retain_handlers(keep);
     }
 }
 

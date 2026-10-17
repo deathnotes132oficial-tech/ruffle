@@ -18,11 +18,8 @@ use crate::avm2::value::Value;
 use crate::avm2::{Error, Object};
 use crate::avm2_stub_method;
 use crate::backend::navigator::{NavigationMethod, Request};
-use crate::context::UpdateContext;
+use crate::display_object::LoaderDisplay;
 use crate::display_object::MovieClip;
-use crate::display_object::{
-    DisplayObject, LoaderDisplay, TDisplayObject as _, TDisplayObjectContainer as _,
-};
 use crate::loader::LoadManager;
 use crate::loader::MovieLoaderVMData;
 use crate::tag_utils::{SwfMovie, SwfMovieData};
@@ -34,7 +31,7 @@ pub fn loader_allocator<'gc>(
 ) -> Result<Object<'gc>, Error<'gc>> {
     // Loader does not have an associated `Character` variant, and can never be
     // instantiated from the timeline.
-    let display_object = LoaderDisplay::empty(activation, *activation.context.root_swf).into();
+    let display_object = LoaderDisplay::empty(activation, activation.caller_movie_or_root()).into();
     let loader = initialize_for_allocator(activation.context, display_object, class);
 
     // Note that the initialization of `_contentLoaderInfo` is intentionally done here,
@@ -65,22 +62,25 @@ pub fn loader_allocator<'gc>(
     Ok(loader.into())
 }
 
+fn content_loader_info<'gc>(this: Value<'gc>) -> LoaderInfoObject<'gc> {
+    this.as_object()
+        .and_then(|this| {
+            this.get_slot(loader_slots::_CONTENT_LOADER_INFO)
+                .as_object()
+        })
+        .and_then(|info| info.as_loader_info_object())
+        .expect("Loader allocator sets _contentLoaderInfo")
+}
+
 pub fn load<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Value<'gc>,
     args: FunctionArgs<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this = this.as_object().unwrap();
-
     let url_request = args.get_object(activation, 0, "request")?;
     let context = args.try_get_object(1);
 
-    let loader_info = this
-        .get_slot(loader_slots::_CONTENT_LOADER_INFO)
-        .as_object()
-        .unwrap();
-
-    let loader_info = loader_info.as_loader_info_object().unwrap();
+    let loader_info = content_loader_info(this);
 
     if loader_info.init_event_fired() {
         // FIXME: When calling load/loadBytes, then calling load/loadBytes again
@@ -250,18 +250,11 @@ pub fn load_bytes<'gc>(
     this: Value<'gc>,
     args: FunctionArgs<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this = this.as_object().unwrap();
-
     let arg0 = args.get_object(activation, 0, "data")?;
     let bytes = arg0.as_bytearray().unwrap().bytes().to_vec();
     let context = args.try_get_object(1);
 
-    let loader_info = this
-        .get_slot(loader_slots::_CONTENT_LOADER_INFO)
-        .as_object()
-        .unwrap();
-
-    let loader_info = loader_info.as_loader_info_object().unwrap();
+    let loader_info = content_loader_info(this);
 
     if loader_info.init_event_fired() {
         // FIXME: When calling load/loadBytes, then calling load/loadBytes again
@@ -319,44 +312,18 @@ pub fn load_bytes<'gc>(
 
 /// `Loader.unloadAndStop`
 ///
-/// Unloads like `unload`, and additionally stops the content on its way out:
-/// Flash guarantees that sounds and timelines belonging to unloaded content
-/// stop running, so that a movie which is done with an asset does not keep
-/// paying for it. The `gc` argument asks the player to reclaim the memory now
-/// rather than whenever the collector next gets round to it, which is what
-/// makes repeated load/unload cycles reach a steady state instead of drifting
-/// upwards for as long as the collector stays idle.
+/// The `gc` argument asks the player to reclaim the memory now rather than
+/// whenever the collector next gets round to it, which is what makes repeated
+/// load/unload cycles reach a steady state instead of drifting upwards for as
+/// long as the collector stays idle.
 pub fn unload_and_stop<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Value<'gc>,
     args: FunctionArgs<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this = this.as_object().unwrap();
-    let run_gc = args.get_bool(0);
+    content_loader_info(this).unload_and_stop(activation.context);
 
-    let loader_info = this
-        .get_slot(loader_slots::_CONTENT_LOADER_INFO)
-        .as_object()
-        .unwrap();
-
-    let loader_info = loader_info.as_loader_info_object().unwrap();
-
-    // Take a handle on the content before `unload` resets the stream.
-    let content = match loader_info.loader_stream() {
-        LoaderStream::Swf(_, root) => Some(root),
-        LoaderStream::NotYetLoaded(_, root, _) => root,
-    };
-
-    if let Some(content) = content {
-        activation
-            .context
-            .stop_sounds_on_parent_and_children(content);
-        stop_timelines(activation.context, content);
-    }
-
-    loader_info.unload(activation.context);
-
-    if run_gc {
+    if args.get_bool(0) {
         // Flash collects immediately here. Ask the player for a full cycle at
         // the end of this update rather than charging the collector directly:
         // content commonly calls this once per loader it owns when it tears a
@@ -367,32 +334,12 @@ pub fn unload_and_stop<'gc>(
     Ok(Value::Undefined)
 }
 
-/// Stops every timeline in `content` and below it.
-fn stop_timelines<'gc>(context: &mut UpdateContext<'gc>, content: DisplayObject<'gc>) {
-    if let Some(clip) = content.as_movie_clip() {
-        clip.stop(context);
-    }
-
-    if let Some(container) = content.as_container() {
-        for child in container.iter_render_list() {
-            stop_timelines(context, child);
-        }
-    }
-}
-
 pub fn unload<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Value<'gc>,
     _args: FunctionArgs<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this = this.as_object().unwrap();
-
-    let loader_info = this
-        .get_slot(loader_slots::_CONTENT_LOADER_INFO)
-        .as_object()
-        .unwrap();
-
-    let loader_info = loader_info.as_loader_info_object().unwrap();
+    let loader_info = content_loader_info(this);
 
     loader_info.unload(activation.context);
 

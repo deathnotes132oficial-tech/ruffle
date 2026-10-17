@@ -1,0 +1,3 @@
+unloaded while both sounds were loading
+the child's queued sound played after unloading: false
+the parent's queued sound played after unloading: true
