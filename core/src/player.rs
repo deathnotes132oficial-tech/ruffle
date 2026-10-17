@@ -1244,11 +1244,12 @@ impl Player {
             let (presos, bytes_presos, livres, bytes_livres) =
                 context.library.presos_por_script();
             let (texturas, bytes_texturas) = context.library.texturas();
+            let (orfaos, orfaos_vivos) = context.orphan_manager.quantos(context.gc());
 
             let mb = |bytes: usize| bytes / (1024 * 1024);
 
             format!(
-                "{swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregamentos} sem-clipe {sem_clipe} pendentes {pendentes} | presos {presos} ({} MB) livres {livres} ({} MB) | texturas {texturas} ({} MB)",
+                "{swfs} swfs | {figuras} figuras | donos 1:{um} 2:{dois} 3+:{muitos} | carregamentos {carregamentos} sem-clipe {sem_clipe} pendentes {pendentes} | presos {presos} ({} MB) livres {livres} ({} MB) | texturas {texturas} ({} MB) | orfaos {orfaos} vivos {orfaos_vivos}",
                 mb(bytes_presos),
                 mb(bytes_livres),
                 mb(bytes_texturas),

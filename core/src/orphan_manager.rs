@@ -42,6 +42,27 @@ impl<'gc> OrphanManager<'gc> {
         }
     }
 
+    /// SONDA — quantos orfaos estao na lista, e quantos deles ainda vivos.
+    ///
+    /// Um clipe que sai da tela mas continua vivo fica aqui rodando os quadros
+    /// dele PARA SEMPRE. A lista guarda referencia fraca de proposito, entao
+    /// ele deveria sumir quando o coletor o levasse — mas os filmes das salas
+    /// nunca morrem (medido: todos presos pelo dominio), e um filme vivo
+    /// segura os clipes dele.
+    ///
+    /// Se este numero sobe a cada sala criada e nunca desce, e isto que faz a
+    /// memoria subir com o jogo parado: as salas que voce ja deixou continuam
+    /// rodando, todas juntas.
+    pub fn quantos(&self, mc: &Mutation<'gc>) -> (usize, usize) {
+        let total = self.orphans.len();
+        let vivos = self
+            .orphans
+            .iter()
+            .filter(|d| valid_orphan(**d, mc).is_some())
+            .count();
+        (total, vivos)
+    }
+
     pub fn each_orphan_obj(
         context: &mut UpdateContext<'gc>,
         mut f: impl FnMut(DisplayObject<'gc>, &mut UpdateContext<'gc>),
