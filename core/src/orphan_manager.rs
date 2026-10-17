@@ -1,7 +1,9 @@
 //! Special handling for AVM2 orphan objects
 
 use crate::context::UpdateContext;
-use crate::display_object::{DisplayObject, DisplayObjectWeak, TDisplayObject};
+use crate::display_object::{
+    DisplayObject, DisplayObjectWeak, TDisplayObject, TDisplayObjectContainer,
+};
 use gc_arena::{Collect, Mutation};
 use std::cell::Cell;
 use std::rc::Rc;
