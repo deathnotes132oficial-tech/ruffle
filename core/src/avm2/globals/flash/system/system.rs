@@ -9,6 +9,19 @@ use crate::avm2::value::Value;
 use crate::avm2_stub_method;
 use ruffle_common::sandbox::SandboxType;
 
+/// Implements `flash.system.System.gc` method
+///
+/// Flash Player's release builds ignore this call; its debugger and AIR
+/// collect.
+pub fn gc<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Value<'gc>,
+    _args: FunctionArgs<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    *activation.context.full_gc_requested = true;
+    Ok(Value::Undefined)
+}
+
 /// Implements `flash.system.System.setClipboard` method
 pub fn set_clipboard<'gc>(
     activation: &mut Activation<'_, 'gc>,

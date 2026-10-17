@@ -179,6 +179,53 @@ pub fn released_class_frees_library(
     })
 }
 
+const FRAMES_BETWEEN_GC_REQUESTS: usize = 3;
+const REQUESTED_GC_WINDOW: usize = 10;
+
+pub fn requested_gc_is_postponed_not_dropped(
+    environment: &impl Environment,
+) -> Result<(), libtest_mimic::Failed> {
+    let test = &Test::from_options(
+        TestOptions {
+            num_frames: Some(45),
+            output_path: "output.txt".into(),
+            ..Default::default()
+        },
+        VfsPath::new(PhysicalFS::new("tests/swfs/avm2/system_gc_cadence/")),
+        "system_gc_cadence".to_string(),
+    )?;
+
+    let mut runner = test.create_test_runner(environment)?;
+    let mut resident = Vec::new();
+    loop {
+        let status = runner.tick()?;
+        let b = resident_movies(&mut runner.player().lock().unwrap())
+            .iter()
+            .any(|url| url.ends_with("b.swf"));
+        resident.push(b);
+        match status {
+            TestStatus::Continue => {}
+            TestStatus::Sleep(duration) => sleep(duration),
+            TestStatus::Finished => break,
+        }
+    }
+
+    let Some(unloaded) = resident.iter().rposition(|b| *b) else {
+        return Err("b.swf was never resident".into());
+    };
+    let loaded = resident[..unloaded]
+        .iter()
+        .position(|b| *b)
+        .unwrap_or(unloaded);
+    if unloaded - loaded > FRAMES_BETWEEN_GC_REQUESTS + REQUESTED_GC_WINDOW + 1 {
+        return Err(format!(
+            "b.swf stayed resident from frame {loaded} to {unloaded}, past the requested collection's window"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn leaves_nothing_behind(
     environment: &impl Environment,
     name: &str,

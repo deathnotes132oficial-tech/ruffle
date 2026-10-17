@@ -2492,22 +2492,21 @@ impl Player {
             }
         }
 
-        // GC. Content can ask for a full collection (`unloadAndStop(true)`),
-        // which Flash honours by collecting immediately. Any number of
-        // requests in one update cost one cycle, and a request is only
-        // granted once every `REQUESTED_GC_MIN_FRAMES` frames: a game tears a
-        // zone down by disposing every loader it owns, one `unloadAndStop`
-        // each, spread over the frames in which their loads finish, and
-        // honouring each of those with a full cycle of its own would keep
-        // the collector running flat out for the whole transition. Requests
-        // that fall inside the window are not lost - the collector is paced
-        // by the memory the libraries report, and its next cycle picks the
-        // content up - they are just not granted immediately.
+        // GC. Content can ask for a full collection (`unloadAndStop(true)`,
+        // `System.gc()`), which Flash honours by collecting immediately. Any
+        // number of requests in one update cost one cycle, and a request is
+        // only granted once every `REQUESTED_GC_MIN_FRAMES` frames: a game
+        // tears a zone down by disposing every loader it owns, one
+        // `unloadAndStop` each, spread over the frames in which their loads
+        // finish, and honouring each of those with a full cycle of its own
+        // would keep the collector running flat out for the whole transition.
+        // A request that falls inside the window waits for its end.
         const REQUESTED_GC_MIN_FRAMES: u32 = 10;
         self.frames_since_requested_gc = self.frames_since_requested_gc.saturating_add(1);
-        let full = std::mem::take(&mut self.full_gc_requested)
-            && self.frames_since_requested_gc >= REQUESTED_GC_MIN_FRAMES;
+        let full =
+            self.full_gc_requested && self.frames_since_requested_gc >= REQUESTED_GC_MIN_FRAMES;
         if full {
+            self.full_gc_requested = false;
             self.frames_since_requested_gc = 0;
         }
         self.collect_garbage(full);
@@ -2539,48 +2538,63 @@ impl Player {
             arena.finish_cycle();
         }
 
-        let marked = if full {
-            arena.finish_marking()
+        // A cycle that is already marking keeps whatever was reachable when
+        // it began, such as content unloaded since, so a full collection
+        // finishes that cycle and then runs one of its own.
+        let cycles = if full
+            && matches!(
+                arena.collection_phase(),
+                CollectionPhase::Marking | CollectionPhase::Marked
+            ) {
+            2
         } else {
-            arena.mark_debt()
+            1
         };
-        let Some(mut marked) = marked else {
-            // Marking is either still under way with the debt paid off, or the
-            // collector is sweeping or asleep. Neither needs the libraries
-            // consulted; carry on with whatever the cycle has left to do.
-            arena.cycle_debt();
-            return;
-        };
+        for _ in 0..cycles {
+            let marked = if full {
+                arena.finish_marking()
+            } else {
+                arena.mark_debt()
+            };
+            let Some(mut marked) = marked else {
+                // Marking is either still under way with the debt paid off, or
+                // the collector is sweeping or asleep. Neither needs the
+                // libraries consulted; carry on with whatever the cycle has
+                // left to do.
+                arena.cycle_debt();
+                return;
+            };
 
-        // Marking has finished. Ask the libraries whether they are needed,
-        // resuming marking after every round of resurrections until there is
-        // nothing more to resurrect. Only then is it safe to sweep.
-        loop {
-            let resume_marking = marked.finalize(|fc, root| {
-                let mut data = root
-                    .data
-                    .try_borrow_mut(fc)
-                    .expect("Arena root borrowed during garbage collection");
-                let resume = data.library.resolve_releasable_libraries(fc);
-                if !resume {
-                    // skua #13: marking is final; drop weak-dictionary entries whose key died.
-                    data.avm2.skua_purge_weak_dictionaries(fc);
+            // Marking has finished. Ask the libraries whether they are needed,
+            // resuming marking after every round of resurrections until there
+            // is nothing more to resurrect. Only then is it safe to sweep.
+            loop {
+                let resume_marking = marked.finalize(|fc, root| {
+                    let mut data = root
+                        .data
+                        .try_borrow_mut(fc)
+                        .expect("Arena root borrowed during garbage collection");
+                    let resume = data.library.resolve_releasable_libraries(fc);
+                    if !resume {
+                        // skua #13: marking is final; drop weak-dictionary entries whose key died.
+                        data.avm2.skua_purge_weak_dictionaries(fc);
+                    }
+                    resume
+                });
+                marked = arena
+                    .finish_marking()
+                    .expect("Collector cannot be sweeping while its libraries are being resolved");
+                if !resume_marking {
+                    break;
                 }
-                resume
-            });
-            marked = arena
-                .finish_marking()
-                .expect("Collector cannot be sweeping while its libraries are being resolved");
-            if !resume_marking {
-                break;
             }
-        }
 
-        marked.start_sweeping();
-        if full {
-            arena.finish_cycle();
-        } else {
-            arena.cycle_debt();
+            marked.start_sweeping();
+            if full {
+                arena.finish_cycle();
+            } else {
+                arena.cycle_debt();
+            }
         }
     }
 

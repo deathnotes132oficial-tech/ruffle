@@ -1,0 +1,2 @@
+keys before System.gc(): dropped, held
+keys after System.gc(): held
