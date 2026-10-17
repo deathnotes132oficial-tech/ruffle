@@ -10,6 +10,7 @@ use crate::movie_library::{
 };
 use crate::shared_object::{shared_object_avm1, shared_object_avm2, shared_object_self_ref_avm1};
 use crate::weak_dictionary::weak_keys_are_collected;
+use crate::weak_listeners::dead_weak_listeners_are_pruned_on_dispatch;
 use anyhow::Context;
 use clap::Parser;
 use libtest_mimic::{Arguments, Trial};
@@ -29,6 +30,7 @@ mod external_interface;
 mod movie_library;
 mod shared_object;
 mod weak_dictionary;
+mod weak_listeners;
 
 const TEST_TOML_NAME: &str = "test.toml";
 
@@ -129,6 +131,12 @@ fn main() {
     runner.with_additional_test(Trial::test("released_class_frees_library", move || {
         released_class_frees_library(&*env_clone)
     }));
+
+    let env_clone = env.clone();
+    runner.with_additional_test(Trial::test(
+        "dead_weak_listeners_are_pruned_on_dispatch",
+        move || dead_weak_listeners_are_pruned_on_dispatch(&*env_clone),
+    ));
 
     let env_clone = env.clone();
     runner.with_additional_test(Trial::test("weak_keys_are_collected", move || {

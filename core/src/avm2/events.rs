@@ -4,11 +4,11 @@ use crate::avm2::Avm2;
 use crate::avm2::activation::Activation;
 use crate::avm2::function::FunctionArgs;
 use crate::avm2::globals::slots::flash_events_event_dispatcher as slots;
-use crate::avm2::object::{EventObject, FunctionObject, Object, TObject as _};
+use crate::avm2::object::{EventObject, FunctionObject, FunctionObjectWeak, Object, TObject as _};
 use crate::display_object::TDisplayObject;
 use crate::string::AvmString;
 use fnv::FnvHashMap;
-use gc_arena::{Collect, Mutation};
+use gc_arena::{Collect, Gc, Mutation};
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
@@ -208,20 +208,34 @@ impl<'gc> DispatchList<'gc> {
             .or_default()
     }
 
+    fn remove_collected_handlers(&mut self, mc: &Mutation<'gc>, event: AvmString<'gc>) {
+        if let Some(event_sheaf) = self.0.get_mut(&event) {
+            for set in event_sheaf.values_mut() {
+                set.retain(|h| h.handler.upgrade(mc).is_some());
+            }
+        }
+    }
+
     /// Add an event handler to this dispatch list.
     ///
     /// This enforces the invariant that an `EventHandler` must not appear at
     /// more than one priority (since we can't enforce that with clever-er data
     /// structure selection). If an event handler already exists, it will not
     /// be added again, and this function will silently fail.
+    ///
+    /// With `use_weak_reference`, the list does not keep the handler alive.
     pub fn add_event_listener(
         &mut self,
+        mc: &Mutation<'gc>,
         event: AvmString<'gc>,
         priority: i32,
         handler: FunctionObject<'gc>,
         use_capture: bool,
+        use_weak_reference: bool,
     ) {
-        let new_handler = EventHandler::new(handler, use_capture);
+        self.remove_collected_handlers(mc, event);
+
+        let new_handler = EventHandler::new(handler, use_capture, use_weak_reference);
 
         if let Some(event_sheaf) = self.get_event(event) {
             for other_set in event_sheaf.values() {
@@ -241,11 +255,14 @@ impl<'gc> DispatchList<'gc> {
     /// removed from any priority in the list.
     pub fn remove_event_listener(
         &mut self,
+        mc: &Mutation<'gc>,
         event: AvmString<'gc>,
         handler: FunctionObject<'gc>,
         use_capture: bool,
     ) {
-        let old_handler = EventHandler::new(handler, use_capture);
+        self.remove_collected_handlers(mc, event);
+
+        let old_handler = EventHandler::new(handler, use_capture, false);
 
         for set in self.get_event_mut(event).values_mut() {
             if let Some(pos) = set.iter().position(|h| *h == old_handler) {
@@ -255,26 +272,24 @@ impl<'gc> DispatchList<'gc> {
     }
 
     /// Determine if there are any event listeners in this dispatch list.
-    pub fn has_event_listener(&self, event: AvmString<'gc>) -> bool {
-        if let Some(event_sheaf) = self.get_event(event) {
-            for set in event_sheaf.values() {
-                if !set.is_empty() {
-                    return true;
-                }
-            }
-        }
-
-        false
+    pub fn has_event_listener(&self, mc: &Mutation<'gc>, event: AvmString<'gc>) -> bool {
+        self.get_event(event).is_some_and(|event_sheaf| {
+            event_sheaf
+                .values()
+                .flatten()
+                .any(|h| h.handler.upgrade(mc).is_some())
+        })
     }
 
     /// Remove the handlers for which `keep` returns false, from every event.
     pub fn retain_handlers(
         &mut self,
+        mc: &Mutation<'gc>,
         mut keep: impl FnMut(AvmString<'gc>, FunctionObject<'gc>) -> bool,
     ) {
         for (event, priorities) in self.0.iter_mut() {
             for handlers in priorities.values_mut() {
-                handlers.retain(|h| keep(*event, h.handler));
+                handlers.retain(|h| h.handler.upgrade(mc).is_some_and(|f| keep(*event, f)));
             }
         }
     }
@@ -289,6 +304,7 @@ impl<'gc> DispatchList<'gc> {
     /// phases.
     pub fn iter_event_handlers<'a>(
         &'a mut self,
+        mc: &'a Mutation<'gc>,
         event: AvmString<'gc>,
         use_capture: bool,
     ) -> impl 'a + Iterator<Item = FunctionObject<'gc>> {
@@ -297,7 +313,7 @@ impl<'gc> DispatchList<'gc> {
             .rev()
             .flat_map(|(_p, v)| v.iter())
             .filter(move |eh| eh.use_capture == use_capture)
-            .map(|eh| eh.handler)
+            .filter_map(move |eh| eh.handler.upgrade(mc))
     }
 }
 
@@ -307,12 +323,35 @@ impl Default for DispatchList<'_> {
     }
 }
 
+#[derive(Clone, Copy, Collect)]
+#[collect(no_drop)]
+enum HandlerRef<'gc> {
+    Strong(FunctionObject<'gc>),
+    Weak(FunctionObjectWeak<'gc>),
+}
+
+impl<'gc> HandlerRef<'gc> {
+    fn as_ptr(self) -> *const () {
+        match self {
+            HandlerRef::Strong(f) => Gc::as_ptr(f.0).cast(),
+            HandlerRef::Weak(w) => w.0.as_ptr().cast(),
+        }
+    }
+
+    fn upgrade(self, mc: &Mutation<'gc>) -> Option<FunctionObject<'gc>> {
+        match self {
+            HandlerRef::Strong(f) => Some(f),
+            HandlerRef::Weak(w) => w.0.upgrade(mc).map(FunctionObject),
+        }
+    }
+}
+
 /// A single instance of an event handler.
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 struct EventHandler<'gc> {
     /// The event handler to call.
-    handler: FunctionObject<'gc>,
+    handler: HandlerRef<'gc>,
 
     /// Indicates if this handler should only be called for capturing events
     /// (when `true`), or if it should only be called for bubbling and
@@ -321,7 +360,12 @@ struct EventHandler<'gc> {
 }
 
 impl<'gc> EventHandler<'gc> {
-    fn new(handler: FunctionObject<'gc>, use_capture: bool) -> Self {
+    fn new(handler: FunctionObject<'gc>, use_capture: bool, use_weak_reference: bool) -> Self {
+        let handler = if use_weak_reference {
+            HandlerRef::Weak(FunctionObjectWeak(Gc::downgrade(handler.0)))
+        } else {
+            HandlerRef::Strong(handler)
+        };
         Self {
             handler,
             use_capture,
@@ -355,7 +399,7 @@ pub fn retain_listeners<'gc>(
         dispatch_list
             .as_dispatch_mut(mc)
             .expect("Internal dispatch list is missing")
-            .retain_handlers(keep);
+            .retain_handlers(mc, keep);
     }
 }
 
@@ -405,15 +449,20 @@ fn dispatch_event_to_target<'gc>(
 
     let dispatch_list = dispatch_list.unwrap();
 
-    let mut evtmut = event.event_mut(activation.gc());
+    let mc = activation.gc();
+    let mut evtmut = event.event_mut(mc);
     let name = evtmut.event_type();
     let use_capture = evtmut.phase() == EventPhase::Capturing;
 
-    let handlers: Vec<FunctionObject<'gc>> = dispatch_list
-        .as_dispatch_mut(activation.gc())
-        .expect("Internal dispatch list is missing during dispatch!")
-        .iter_event_handlers(name, use_capture)
-        .collect();
+    let handlers: Vec<FunctionObject<'gc>> = {
+        let mut dispatch_list = dispatch_list
+            .as_dispatch_mut(mc)
+            .expect("Internal dispatch list is missing during dispatch!");
+        dispatch_list.remove_collected_handlers(mc, name);
+        dispatch_list
+            .iter_event_handlers(mc, name, use_capture)
+            .collect()
+    };
 
     if !handlers.is_empty() {
         evtmut.set_target(real_target);

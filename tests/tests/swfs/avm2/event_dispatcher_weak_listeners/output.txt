@@ -1,0 +1,12 @@
+before collection:
+  weak listener
+  strong listener
+  kept listener
+  anonymous listener
+lonely has a ping listener: true
+after collection:
+  strong listener
+  kept listener
+lonely has a ping listener: false
+panels alive: kept, strong
+stage has a ping listener: false
