@@ -24,6 +24,8 @@ thread_local! {
     static ENTRADAS_POUPADAS: Cell<u64> = const { Cell::new(0) };
     /// Quantas entradas proprias as vtables guardam somadas — o que sobrou.
     static ENTRADAS_PROPRIAS: Cell<u64> = const { Cell::new(0) };
+    /// Quantas vezes alguem precisou da tabela achatada montada na hora.
+    static ACHATAMENTOS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Devolve (vtables montadas, entradas poupadas, entradas proprias).
@@ -31,11 +33,12 @@ thread_local! {
 /// Antes, cada vtable copiava todas as entradas dos ancestrais. "Poupadas" e
 /// quanto disso deixou de ser copiado; "proprias" e o que de fato ficou
 /// guardado. A razao entre os dois e o tamanho do conserto.
-pub fn contagem_de_vtables() -> (u64, u64, u64) {
+pub fn contagem_de_vtables() -> (u64, u64, u64, u64) {
     (
         MONTADAS.with(|c| c.get()),
         ENTRADAS_POUPADAS.with(|c| c.get()),
         ENTRADAS_PROPRIAS.with(|c| c.get()),
+        ACHATAMENTOS.with(|c| c.get()),
     )
 }
 
@@ -256,6 +259,10 @@ impl<'gc> VTable<'gc> {
     /// esta tabela pronta em cada classe era justamente o gasto que o conserto
     /// eliminou.
     pub fn traits_achatados(self) -> PropertyMap<'gc, Property> {
+        // Contado porque ja me enganou uma vez: se este numero correr durante
+        // o jogo, sobrou caminho quente montando a tabela a toa.
+        ACHATAMENTOS.with(|c| c.set(c.get() + 1));
+
         let mut cadeia = Vec::new();
         let mut atual = Some(self);
         while let Some(v) = atual {
@@ -783,12 +790,34 @@ impl<'gc> VTable<'gc> {
     }
 
     pub fn public_properties(self) -> impl Iterator<Item = (AvmString<'gc>, Property)> {
-        let achatada = self.traits_achatados();
-        let saida: Vec<_> = achatada
-            .iter()
-            .filter(|(_, ns, _)| ns.is_public())
-            .map(|(name, _, prop)| (name, *prop))
-            .collect();
+        // PERCORRE A CADEIA, NAO MONTA TABELA.
+        //
+        // Isto e chamado na serializacao e na enumeracao de objetos — coisa
+        // que um jogo em rede faz o tempo todo. Montar aqui a tabela achatada
+        // (167 entradas num mapa novo, duas vezes por objeto) fez a memoria
+        // subir 115 MB por minuto com o jogo PARADO.
+        //
+        // Subindo a cadeia do filho pra raiz, o PRIMEIRO que aparece e o que
+        // vale — mesma regra da tabela achatada, onde o proprio era inserido
+        // por cima do herdado.
+        let mut saida: Vec<(AvmString<'gc>, Property)> = Vec::new();
+        let mut vistos: Vec<AvmString<'gc>> = Vec::new();
+
+        let mut atual = Some(self);
+        while let Some(v) = atual {
+            for (name, ns, prop) in Gc::as_ref(v.0).traits_proprios.iter() {
+                if !ns.is_public() {
+                    continue;
+                }
+                if vistos.iter().any(|visto| *visto == name) {
+                    continue;
+                }
+                vistos.push(name);
+                saida.push((name, *prop));
+            }
+            atual = Gc::as_ref(v.0).pai;
+        }
+
         saida.into_iter()
     }
 }
