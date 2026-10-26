@@ -306,6 +306,11 @@ impl<'gc> GcRootData<'gc> {
 
 type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
 
+thread_local! {
+    /// Quando a sonda de memoria escreveu pela ultima vez.
+    static ULTIMA_SONDA: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum RunState {
     Playing,
@@ -566,6 +571,8 @@ impl Player {
         if !self.is_playing() {
             return;
         }
+
+        self.sonda_de_memoria();
 
         self.frame_accumulator += dt;
         let frame_duration = self.frame_duration();
@@ -2309,6 +2316,53 @@ impl Player {
 
     /// Runs the closure `f` with an `UpdateContext`.
     /// This takes cares of populating the `UpdateContext` struct, avoiding borrow issues.
+    /// MEDICAO, NAO PRODUCAO (ramo medir-skua).
+    ///
+    /// Existe pra comparar esta copia com a nossa, no mesmo jogo e no mesmo
+    /// gesto (criar e sair de sala). A pagina de teste ja sabe ler estas duas
+    /// linhas: tira o "gc N" da REPARTICAO pra calcular o PISO numa janela de
+    /// dois minutos, e os dois primeiros numeros da BIBLIOTECA pro canto da
+    /// tela. O piso e o instrumento certo: o numero solto sobe e desce com o
+    /// jogo respirando; o piso so sobe quando nasce objeto que nunca morre.
+    ///
+    /// Os numeros vem do MemoryReport que a propria copia ja traz — nada aqui
+    /// conta por conta propria.
+    fn sonda_de_memoria(&mut self) {
+        let agora = Instant::now();
+        let passou = ULTIMA_SONDA.with(|u| match u.get() {
+            Some(antes) => agora.duration_since(antes).as_secs_f64() >= 2.0,
+            None => true,
+        });
+        if !passou {
+            return;
+        }
+        ULTIMA_SONDA.with(|u| u.set(Some(agora)));
+
+        let divida = self.gc_arena.borrow().metrics().allocation_debt() as u64;
+        let r = self.mutate_with_update_context(|context| {
+            crate::memory_report::MemoryReport::capture(context)
+        });
+        let mb = |b: usize| b / (1024 * 1024);
+        let vivos = r.movies.iter().filter(|m| m.content_alive).count();
+
+        tracing::warn!("BIBLIOTECA: {} swfs | {} figuras", r.movies.len(), r.characters);
+        tracing::warn!(
+            "REPARTICAO: swf {} MB imagens {} MB decodificadas {} MB | gc {} divida {} | filmes {} com-conteudo {} | pendentes {} | externo {} MB | texturas {} ({} MB) malhas {}",
+            mb(r.swf_bytes),
+            mb(r.bitmap_source_bytes),
+            mb(r.bitmap_decoded_bytes),
+            r.gc_objects,
+            divida,
+            r.movies.len(),
+            vivos,
+            r.pending_loaders,
+            mb(r.gc_external_bytes),
+            r.tracked_textures,
+            mb(r.tracked_texture_bytes),
+            r.meshes,
+        );
+    }
+
     pub fn mutate_with_update_context<F, R>(&mut self, f: F) -> R
     where
         F: for<'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
