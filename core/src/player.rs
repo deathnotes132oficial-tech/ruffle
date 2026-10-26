@@ -2363,6 +2363,40 @@ impl Player {
         );
     }
 
+    /// COLETA COMPLETA, PEDIDA POR QUEM ENXERGA A MEMORIA DO APARELHO.
+    ///
+    /// Trazida da nossa copia antiga (master, 29/09). O coletor se guia pela
+    /// contagem de objetos, nao pela carga pendurada neles, entao nao percebe
+    /// quando um punhado de objetos mortos segura muita memoria. Quem percebe
+    /// e o aplicativo do iPhone, que le a folga do aparelho e chama isto
+    /// quando ela fica curta.
+    ///
+    /// No maximo uma vez por segundo: uma volta completa custa, e o aviso de
+    /// memoria curta pode chegar em rajada.
+    ///
+    /// Devolve quantos objetos foram coletados.
+    pub fn coletar_tudo(&mut self) -> usize {
+        thread_local! {
+            static ULTIMA_COLETA: std::cell::Cell<Option<Instant>> =
+                const { std::cell::Cell::new(None) };
+        }
+
+        let agora = Instant::now();
+        let pode = ULTIMA_COLETA.with(|u| match u.get() {
+            Some(antes) => agora.duration_since(antes).as_millis() >= 1000,
+            None => true,
+        });
+        if !pode {
+            return 0;
+        }
+        ULTIMA_COLETA.with(|u| u.set(Some(agora)));
+
+        let antes = self.gc_arena.borrow().metrics().total_gc_count();
+        self.gc_arena.borrow_mut().finish_cycle();
+        let depois = self.gc_arena.borrow().metrics().total_gc_count();
+        antes.saturating_sub(depois)
+    }
+
     pub fn mutate_with_update_context<F, R>(&mut self, f: F) -> R
     where
         F: for<'gc> FnOnce(&mut UpdateContext<'gc>) -> R,
