@@ -1,4 +1,5 @@
-use std::cell::OnceCell;
+use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 use crate::backend::audio::SoundHandle;
 use crate::binary_data::BinaryData;
@@ -66,11 +67,19 @@ impl<'gc> Character<'gc> {
 #[derive(Collect, Debug)]
 #[collect(no_drop)]
 pub struct BitmapCharacter<'gc> {
+    /// Shared with the `BitmapData` copies made from this symbol, so that
+    /// they can drop their decoded pixels and rebuild them from here.
     #[collect(require_static)]
-    compressed: CompressedBitmap,
-    /// A lazily constructed GPU handle, used when performing fills with this bitmap
+    compressed: Arc<CompressedBitmap>,
+    /// A lazily constructed GPU handle, used when performing fills with this bitmap.
+    ///
+    /// Released by [`Self::evict_stale_handle`] once nothing has drawn the
+    /// bitmap for a while, and uploaded again from `compressed` on the next
+    /// draw, the same way it was uploaded the first time.
     #[collect(require_static)]
-    handle: OnceCell<BitmapHandle>,
+    handle: RefCell<Option<BitmapHandle>>,
+    #[collect(require_static)]
+    last_drawn: Cell<Option<web_time::Instant>>,
     /// The bitmap class set by `SymbolClass` - this is used when we instantaite
     /// a `Bitmap` displayobject.
     avm2_class: Lock<BitmapClass<'gc>>,
@@ -79,8 +88,9 @@ pub struct BitmapCharacter<'gc> {
 impl<'gc> BitmapCharacter<'gc> {
     pub fn new(compressed: CompressedBitmap) -> Self {
         Self {
-            compressed,
-            handle: OnceCell::default(),
+            compressed: Arc::new(compressed),
+            handle: RefCell::new(None),
+            last_drawn: Cell::new(None),
             avm2_class: Lock::new(BitmapClass::NoSubclass),
         }
     }
@@ -89,12 +99,33 @@ impl<'gc> BitmapCharacter<'gc> {
         &self.compressed
     }
 
+    /// The compressed original, for a copy that wants to hold on to it.
+    pub fn shared_compressed(&self) -> Arc<CompressedBitmap> {
+        Arc::clone(&self.compressed)
+    }
+
     /// Whether this bitmap has already been uploaded to the render backend.
     ///
-    /// An uploaded bitmap also costs GPU memory, which is only reclaimed when
-    /// the character itself is dropped.
+    /// An uploaded bitmap also costs GPU memory, until the handle is evicted
+    /// or the character itself is dropped.
     pub fn is_uploaded(&self) -> bool {
-        self.handle.get().is_some()
+        self.handle.borrow().is_some()
+    }
+
+    /// Releases the GPU handle if nothing has drawn this bitmap since
+    /// `before`. Returns whether it did.
+    ///
+    /// Whoever already holds the handle keeps the texture alive; what ends is
+    /// the library owning, forever, every bitmap the movie ever showed.
+    pub fn evict_stale_handle(&self, before: web_time::Instant) -> bool {
+        if self.handle.borrow().is_none() {
+            return false;
+        }
+        if self.last_drawn.get().is_some_and(|last| last >= before) {
+            return false;
+        }
+        *self.handle.borrow_mut() = None;
+        true
     }
 
     pub fn avm2_class(&self) -> BitmapClass<'gc> {
@@ -109,14 +140,13 @@ impl<'gc> BitmapCharacter<'gc> {
         &self,
         backend: &mut dyn RenderBackend,
     ) -> Result<BitmapHandle, RenderError> {
-        // FIXME - use `OnceCell::get_or_try_init` when stabilized.
-        if let Some(handle) = self.handle.get() {
+        self.last_drawn.set(Some(web_time::Instant::now()));
+        if let Some(handle) = self.handle.borrow().as_ref() {
             return Ok(handle.clone());
         }
         let decoded = self.compressed.decode()?;
         let new_handle = backend.register_bitmap(decoded)?;
-        // FIXME - do we ever want to release this handle, to avoid taking up GPU memory?
-        self.handle.set(new_handle.clone()).unwrap();
+        *self.handle.borrow_mut() = Some(new_handle.clone());
         Ok(new_handle)
     }
 }

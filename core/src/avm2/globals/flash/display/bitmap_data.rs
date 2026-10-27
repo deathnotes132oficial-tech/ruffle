@@ -30,6 +30,7 @@ use crate::swf::BlendMode;
 use ruffle_render::filters::Filter;
 use ruffle_render::transform::Transform;
 use std::str::FromStr;
+use std::sync::Arc;
 use swf::{Rectangle, Twips};
 
 // Computes the integer x,y,width,height values from
@@ -72,10 +73,10 @@ fn get_rectangle_x_y_width_height<'gc>(
 /// class named by `name`.
 pub fn fill_bitmap_data_from_symbol<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    bd: &CompressedBitmap,
+    bd: Arc<CompressedBitmap>,
 ) -> BitmapData<'gc> {
     let bitmap = bd.decode().expect("Failed to decode BitmapData");
-    BitmapData::new_with_pixels(
+    let bitmap_data = BitmapData::new_with_pixels(
         activation.context.gc_context,
         bitmap.width(),
         bitmap.height(),
@@ -84,7 +85,11 @@ pub fn fill_bitmap_data_from_symbol<'gc>(
             .as_colors()
             .map(crate::bitmap::bitmap_data::Color::from)
             .collect(),
-    )
+    );
+    // This is the copy AS3 keeps, so this is where the original has to travel
+    // for the pixels to be droppable.
+    bitmap_data.set_source(activation.gc(), bd);
+    bitmap_data
 }
 
 /// Implements `flash.display.BitmapData`'s 'init' method (invoked from the AS3 constructor)
@@ -114,7 +119,7 @@ pub fn init<'gc>(
 
     let new_bitmap_data = if let Some(Character::Bitmap(bitmap)) = character {
         // Instantiating BitmapData from an Animate-style bitmap asset
-        fill_bitmap_data_from_symbol(activation, bitmap.compressed())
+        fill_bitmap_data_from_symbol(activation, bitmap.shared_compressed())
     } else {
         if character.is_some() {
             //TODO: Determine if mismatched symbols will still work as a

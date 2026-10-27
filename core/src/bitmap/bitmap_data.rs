@@ -1,4 +1,5 @@
 use crate::avm2::object::BitmapDataObject;
+use crate::character::CompressedBitmap;
 use crate::context::RenderContext;
 use crate::display_object::{BoundsMode, DisplayObject, DisplayObjectWeak, TDisplayObject};
 use bitflags::bitflags;
@@ -13,6 +14,7 @@ use ruffle_wstr::WStr;
 use std::cell::Ref;
 use std::fmt::Debug;
 use std::ops::Range;
+use std::sync::Arc;
 use swf::{Rectangle, Twips};
 use tracing::instrument;
 
@@ -294,6 +296,12 @@ impl<'gc> BitmapData<'gc> {
         self.0.read_area(read_area, renderer)
     }
 
+    /// Records the library symbol these pixels were decoded from, so that
+    /// they can be dropped once uploaded and decoded again when read.
+    pub fn set_source(&self, mc: &Mutation<'gc>, source: Arc<CompressedBitmap>) {
+        self.0.set_source(mc, source)
+    }
+
     pub fn height(&self) -> u32 {
         self.0.height()
     }
@@ -387,6 +395,19 @@ pub struct BitmapRawData<'gc> {
     #[collect(require_static)]
     bitmap_handle: Option<BitmapHandle>,
 
+    /// The compressed library symbol these pixels were decoded from, if any.
+    ///
+    /// Every `Bitmap` the content puts on screen from a library symbol gets
+    /// its own decoded copy, kept forever beside the GPU texture: the same
+    /// icon placed fifty times is fifty full copies. With the (small, shared)
+    /// original at hand, the copy can be dropped as soon as the texture
+    /// exists, and decoded again if anything ever reads a pixel.
+    #[collect(require_static)]
+    source: Option<Arc<CompressedBitmap>>,
+
+    /// The pixels were dropped, and must be decoded again before any use.
+    pixels_dropped: bool,
+
     /// The AVM2 side of this `BitmapData`.
     ///
     /// AVM1 cannot retrieve `BitmapData` back from the display object tree, so
@@ -431,6 +452,8 @@ mod wrapper {
     use std::cell::Ref;
 
     use super::{BitmapRawData, DirtyState, copy_pixels_to_bitmapdata};
+    use crate::character::CompressedBitmap;
+    use std::sync::Arc;
 
     /// A wrapper type that ensures that we always wait for a pending
     /// GPU -> CPU sync to complete (using `sync_handle`) before accessing
@@ -483,6 +506,8 @@ mod wrapper {
                     transparency: false,
                     disposed: true,
                     bitmap_handle: None,
+                    source: None,
+                    pixels_dropped: false,
                     avm2_object: None,
                     display_objects: vec![],
                     dirty_state: DirtyState::Clean,
@@ -506,6 +531,8 @@ mod wrapper {
                 transparency: data.transparency,
                 disposed: data.disposed,
                 bitmap_handle: None,
+                source: None,
+                pixels_dropped: false,
                 avm2_object: None,
                 display_objects: vec![],
                 // We have no GPU texture, so there's no need to mark as dirty
@@ -525,6 +552,10 @@ mod wrapper {
             let mut write = unsafe { Write::assume(Gc::as_ref(self.0)) }
                 .unlock()
                 .borrow_mut();
+            // Everything that reaches the CPU-side pixels comes through here
+            // (or `overwrite_cpu_pixels_from_gpu`), so dropped pixels come back
+            // before anyone can see an empty buffer.
+            write.restore_pixels();
             match std::mem::replace(&mut write.dirty_state, DirtyState::Clean) {
                 DirtyState::GpuModified(sync_handle, bounds) => {
                     renderer
@@ -569,6 +600,9 @@ mod wrapper {
             mc: &Mutation<'gc>,
         ) -> (GcRefLock<'gc, BitmapRawData<'gc>>, Option<PixelRegion>) {
             let mut write = self.0.borrow_mut(mc);
+            // Callers index pixels by width, so the buffer has to be full size
+            // even if it is about to be overwritten.
+            write.restore_pixels();
             let dirty_rect = match write.dirty_state {
                 DirtyState::GpuModified(_, rect) => {
                     write.dirty_state = DirtyState::Clean;
@@ -595,7 +629,8 @@ mod wrapper {
             } else {
                 false
             };
-            if needs_update {
+            // `sync` already has the write access restoring the pixels needs.
+            if needs_update || self.0.borrow().pixels_dropped {
                 self.sync(renderer);
             }
             self.0.borrow()
@@ -604,6 +639,10 @@ mod wrapper {
         // These methods do not require a sync to complete, as they do not depend on the
         // CPU-side pixels. They are implemented directly on `BitmapRawDataWrapper`, allowing
         // callers to avoid calling sync()
+
+        pub fn set_source(&self, mc: &Mutation<'gc>, source: Arc<CompressedBitmap>) {
+            self.0.borrow_mut(mc).source = Some(source);
+        }
 
         pub fn height(&self) -> u32 {
             self.0.borrow().height
@@ -751,6 +790,8 @@ impl<'gc> BitmapRawData<'gc> {
             transparency,
             disposed: false,
             bitmap_handle: None,
+            source: None,
+            pixels_dropped: false,
             avm2_object: None,
             display_objects: vec![],
             dirty_state: DirtyState::Clean,
@@ -772,6 +813,8 @@ impl<'gc> BitmapRawData<'gc> {
             height,
             transparency,
             bitmap_handle: None,
+            source: None,
+            pixels_dropped: false,
             avm2_object: None,
             disposed: false,
             dirty_state: DirtyState::Clean,
@@ -789,6 +832,7 @@ impl<'gc> BitmapRawData<'gc> {
         self.width = 0;
         self.height = 0;
         self.pixels.clear_and_free(); // free the CPU pixel buffer
+        self.pixels_dropped = false;
         self.bitmap_handle = None;
         // There's no longer a handle to update
         self.dirty_state = DirtyState::Clean;
@@ -813,8 +857,47 @@ impl<'gc> BitmapRawData<'gc> {
         if let Ok(ref handle) = bitmap_handle {
             self.dirty_state = DirtyState::Clean;
             self.bitmap_handle = Some(handle.clone());
+            // Drawing uses the texture from now on.
+            self.drop_pixels();
         }
         bitmap_handle
+    }
+
+    /// Drops the decoded copy, when it can be decoded again from `source`, the
+    /// texture already exists, and nothing has been written since it was
+    /// decoded. Reads go through `sync`, `read_area` and
+    /// `overwrite_cpu_pixels_from_gpu`, which all restore it first; drawing
+    /// never reads it.
+    fn drop_pixels(&mut self) {
+        if self.pixels_dropped || self.disposed || self.pixels.is_empty() {
+            return;
+        }
+        if self.source.is_none()
+            || self.bitmap_handle.is_none()
+            || !matches!(self.dirty_state, DirtyState::Clean)
+        {
+            return;
+        }
+        self.pixels.clear_and_free();
+        self.pixels_dropped = true;
+    }
+
+    /// Decodes the dropped copy again from `source`.
+    pub fn restore_pixels(&mut self) {
+        if !self.pixels_dropped {
+            return;
+        }
+        self.pixels_dropped = false;
+
+        let len = self.width as usize * self.height as usize;
+        let mut pixels: Vec<Color> = match self.source.as_ref().and_then(|s| s.decode().ok()) {
+            Some(bitmap) => bitmap.as_colors().map(Color::from).collect(),
+            // A black bitmap is bad; a crash is worse.
+            None => vec![Color::bgra_u32(0); len],
+        };
+        // Pixels are indexed from the width, so a short buffer would panic.
+        pixels.resize(len, Color::bgra_u32(0));
+        self.pixels.replace(pixels);
     }
 
     pub fn bitmap_handle(&mut self, renderer: &mut dyn RenderBackend) -> BitmapHandle {
@@ -1092,6 +1175,15 @@ impl TrackedPixels {
             pixels,
             metrics: None,
         }
+    }
+
+    /// Replaces the buffer, reporting the change.
+    pub fn replace(&mut self, pixels: Vec<Color>) {
+        self.clear_and_free();
+        if let Some(metrics) = &self.metrics {
+            crate::skua_external_allocation(metrics, Self::bytes(&pixels));
+        }
+        self.pixels = pixels;
     }
 
     /// Drops the buffer, reporting it freed.

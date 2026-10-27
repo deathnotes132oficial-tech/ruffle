@@ -2576,6 +2576,14 @@ impl Player {
                             "Dropped the meshes of {evicted} shapes not drawn recently"
                         );
                     }
+                    // The same for library bitmaps: Ruffle uploads one on its
+                    // first draw and never let it go.
+                    let evicted = context.library.evict_stale_bitmap_handles(before);
+                    if evicted > 0 {
+                        tracing::debug!(
+                            "Released the textures of {evicted} bitmaps not drawn recently"
+                        );
+                    }
                 });
             }
         }

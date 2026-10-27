@@ -914,6 +914,22 @@ impl<'gc> Library<'gc> {
     /// movie, which for content that keeps assets in a long-lived
     /// `ApplicationDomain` is a long time; their meshes are the largest thing
     /// about them and are cheap to rebuild on the next draw.
+    /// Releases the GPU handles of library bitmaps not drawn since `before`.
+    /// Returns how many were released.
+    pub fn evict_stale_bitmap_handles(&self, before: web_time::Instant) -> usize {
+        let mut evicted = 0;
+        for (_, library) in self.movie_libraries.0.iter() {
+            for character in library.characters.values() {
+                if let Character::Bitmap(bitmap) = character
+                    && bitmap.evict_stale_handle(before)
+                {
+                    evicted += 1;
+                }
+            }
+        }
+        evicted
+    }
+
     pub fn evict_stale_tessellations(&self, before: web_time::Instant) -> usize {
         let mut evicted = 0;
         for (_, library) in self.movie_libraries.0.iter() {
