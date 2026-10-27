@@ -2347,7 +2347,7 @@ impl Player {
 
         tracing::warn!("BIBLIOTECA: {} swfs | {} figuras", r.movies.len(), r.characters);
         tracing::warn!(
-            "REPARTICAO: swf {} MB imagens {} MB decodificadas {} MB | gc {} divida {} | filmes {} com-conteudo {} | pendentes {} | externo {} MB | texturas {} ({} MB) malhas {}",
+            "REPARTICAO: swf {} MB imagens {} MB decodificadas {} MB | gc {} divida {} | filmes {} com-conteudo {} | pendentes {} | externo {} MB | texturas {} ({} MB) malhas {} | gpu texturas {} ({} MB) buffers {} MB malhas {} MB",
             mb(r.swf_bytes),
             mb(r.bitmap_source_bytes),
             mb(r.bitmap_decoded_bytes),
@@ -2360,6 +2360,10 @@ impl Player {
             r.tracked_textures,
             mb(r.tracked_texture_bytes),
             r.meshes,
+            r.gpu_textures,
+            mb(r.gpu_texture_bytes),
+            mb(r.gpu_buffer_bytes),
+            mb(r.mesh_bytes),
         );
     }
 
