@@ -2391,8 +2391,16 @@ impl Player {
         }
         ULTIMA_COLETA.with(|u| u.set(Some(agora)));
 
+        // PELO collect_garbage, E NAO finish_cycle() CRU.
+        //
+        // Nesta base as bibliotecas dos filmes carregados nao sao raizes do
+        // coletor: no fim da marcacao elas sao consultadas e as que ainda
+        // servem sao ressuscitadas. finish_cycle() pula essa consulta e varre
+        // o conteudo de bibliotecas vivas — o desenho le depois memoria ja
+        // liberada (iPhone 13, build 50: wgpu "buffer inexistente" toda vez
+        // que a memoria apertava).
         let antes = self.gc_arena.borrow().metrics().total_gc_count();
-        self.gc_arena.borrow_mut().finish_cycle();
+        self.collect_garbage(true);
         let depois = self.gc_arena.borrow().metrics().total_gc_count();
         antes.saturating_sub(depois)
     }
